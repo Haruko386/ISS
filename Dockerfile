@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /build
 
@@ -9,7 +9,7 @@ RUN python -m pip install --no-cache-dir --upgrade build \
     && python -m build --wheel
 
 
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
