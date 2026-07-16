@@ -1,0 +1,44 @@
+model:
+  backend: stable-diffusion
+  pretrained_model: stable-diffusion-v1-5/stable-diffusion-v1-5
+  use_masks: true
+  gradient_checkpointing: true
+  enable_xformers: false
+  channels_last: true
+
+data:
+  root: data/panoramas
+  image_height: 512
+  image_width: 1024
+  num_workers: 4
+
+loss:
+  diffusion: 1.0
+  reconstruction: 0.05
+  seam: 0.25
+  gradient: 0.05
+  preserve: 0.25
+
+train:
+  output_dir: outputs/sd15
+  batch_size: 1
+  max_steps: 20000
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_accumulation: 4
+  grad_clip: 1.0
+  checkpoint_every: 1000
+  validation_every: 500
+  validation_batches: 2
+  log_every: 10
+  seed: 42
+  device: cuda
+  mixed_precision: fp16
+
+diffusion:
+  train_timesteps: 1000
+  inference_steps: 30
+  strength: 0.35
+  beta_schedule: scaled_linear
+  beta_start: 0.00085
+  beta_end: 0.012

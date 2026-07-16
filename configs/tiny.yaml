@@ -1,0 +1,45 @@
+model:
+  backend: tiny
+  use_masks: true
+  base_channels: 32
+  latent_downsample: 4
+  gradient_checkpointing: false
+  enable_xformers: false
+  channels_last: false
+
+data:
+  root: data/demo
+  image_height: 64
+  image_width: 128
+  num_workers: 0
+
+loss:
+  diffusion: 1.0
+  reconstruction: 0.10
+  seam: 0.50
+  gradient: 0.10
+  preserve: 0.50
+
+train:
+  output_dir: outputs/tiny
+  batch_size: 2
+  max_steps: 1000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  grad_accumulation: 1
+  grad_clip: 1.0
+  checkpoint_every: 250
+  validation_every: 250
+  validation_batches: 2
+  log_every: 10
+  seed: 42
+  device: auto
+  mixed_precision: "no"
+
+diffusion:
+  train_timesteps: 1000
+  inference_steps: 30
+  strength: 0.10
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02

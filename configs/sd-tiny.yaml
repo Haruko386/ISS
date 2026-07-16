@@ -1,0 +1,46 @@
+# Real Diffusers/CLIP/VAE integration smoke test. This downloads a small,
+# safetensors-based testing model; it is not intended to produce useful images.
+model:
+  backend: stable-diffusion
+  pretrained_model: bumblebee-testing/tiny-stable-diffusion
+  use_masks: true
+  gradient_checkpointing: true
+  enable_xformers: false
+  channels_last: true
+
+data:
+  root: data/sd-tiny
+  image_height: 64
+  image_width: 64
+  num_workers: 0
+
+loss:
+  diffusion: 1.0
+  reconstruction: 0.10
+  seam: 0.50
+  gradient: 0.10
+  preserve: 0.50
+
+train:
+  output_dir: outputs/sd-tiny
+  batch_size: 1
+  max_steps: 2
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_accumulation: 1
+  grad_clip: 1.0
+  checkpoint_every: 0
+  validation_every: 1
+  validation_batches: 1
+  log_every: 1
+  seed: 42
+  device: auto
+  mixed_precision: "no"
+
+diffusion:
+  train_timesteps: 1000
+  inference_steps: 2
+  strength: 0.10
+  beta_schedule: scaled_linear
+  beta_start: 0.00085
+  beta_end: 0.012
