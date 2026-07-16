@@ -130,6 +130,69 @@ outputs/demo/
 
 The tiny backend verifies the full data and diffusion pipeline. It is not a pretrained image generator and is not intended to produce high-quality results after only a few steps.
 
+## Dataset download
+
+The current supervised pipeline needs complete RGB panoramas as ground truth. The `prepare` command converts every source panorama into multiple samples containing an aligned left image, an aligned right image, validity masks, a seam mask, and the original panorama as the GT target. A dataset containing only unaligned left/right pairs and no GT panorama is not directly compatible with this training pipeline.
+
+Downloaded and generated data should be stored under the repository's `dataset` directory:
+
+```text
+dataset/
+|-- .placeholder
+|-- raw/                         downloaded source panoramas
+|   `-- PanoHK360/
+`-- prepared/                    generated StitchDiff manifests and images
+    |-- panoramas/
+    `-- sd-tiny/
+```
+
+The contents of `dataset/` are ignored by Git except for `.placeholder`.
+
+### Recommended: PanoHK360 RGB panoramas
+
+[PanoHK360](https://huggingface.co/datasets/adadai3132/PanoHK360) provides high-resolution equirectangular urban panoramas and is published under CC BY 4.0. StitchDiff needs only the RGB images in a `pano_raw` directory; do not pass its depth maps, normal maps, or perspective ROI crops to `prepare`.
+
+Install the current Hugging Face CLI:
+
+```bash
+pip install -U huggingface_hub
+```
+
+Download the filtered RGB panorama directory:
+
+```bash
+hf download "hf://datasets/adadai3132/PanoHK360/R101%2020230413--filter/pano_raw/" --local-dir dataset/raw/PanoHK360
+```
+
+Convert the downloaded panoramas into this project's supervised training format:
+
+```bash
+python main.py prepare --panoramas "dataset/raw/PanoHK360/R101 20230413--filter/pano_raw" --output dataset/prepared/panoramas --width 1024 --height 512 --samples-per-image 16 --validation-fraction 0.1 --seed 42
+```
+
+Re-running `hf download` updates or resumes the local download. Read the dataset card before use, preserve its attribution, and review images for privacy or licensing requirements relevant to the intended application.
+
+### Smaller optional source: SUN360 mirror
+
+For a smaller pipeline experiment, the [Everloom/SUN360 mirror](https://huggingface.co/datasets/Everloom/SUN360) contains train and test image folders. Download only its RGB training directory so that auxiliary labels are not treated as GT images:
+
+```bash
+hf download "hf://datasets/Everloom/SUN360/train/RGB/" --local-dir dataset/raw/SUN360
+python main.py prepare --panoramas dataset/raw/SUN360/train/RGB --output dataset/prepared/panoramas --width 512 --height 256 --samples-per-image 8 --validation-fraction 0.1 --seed 42
+```
+
+The mirror currently has no dataset card or declared license. Verify the original SUN360 usage terms before training or redistributing derived data. For a code-only smoke test with no external download, use `python main.py demo` instead.
+
+### Custom panoramas
+
+You can use your own `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`, or `.webp` panoramas. Place them in `dataset/raw/custom/`, then run:
+
+```bash
+python main.py prepare --panoramas dataset/raw/custom --output dataset/prepared/panoramas --width 1024 --height 512 --samples-per-image 16
+```
+
+Use source images that you are allowed to process. Wider equirectangular images are preferred, but ordinary RGB images can be used to validate the software pipeline.
+
 ## Command overview
 
 ```text
@@ -174,10 +237,10 @@ Alignment fails with an explicit error when there are not enough reliable matche
 
 ## 2. Prepare a training dataset
 
-Create training triplets from one complete panorama or a directory of panoramas:
+Create training triplets from one complete panorama or a directory of panoramas. The following example assumes the source images were placed or downloaded under `dataset/raw/custom`:
 
 ```bash
-python main.py prepare --panoramas path/to/panoramas --output data/panoramas --width 1024 --height 512 --samples-per-image 16
+python main.py prepare --panoramas dataset/raw/custom --output dataset/prepared/panoramas --width 1024 --height 512 --samples-per-image 16
 ```
 
 The generator creates overlapping left/right conditions, masks, a GT panorama, exposure and color changes, and small residual shifts.
@@ -201,7 +264,7 @@ Real datasets can use the same manifest format. Every left image, right image, m
 Useful preparation options:
 
 ```bash
-python main.py prepare --panoramas path/to/panoramas --output data/panoramas --width 512 --height 256 --samples-per-image 32 --validation-fraction 0.1 --residual-shift 2 --seed 42
+python main.py prepare --panoramas dataset/raw/custom --output dataset/prepared/panoramas --width 512 --height 256 --samples-per-image 32 --validation-fraction 0.1 --residual-shift 2 --seed 42
 ```
 
 Both image dimensions must be divisible by 8 for Stable Diffusion training.
@@ -209,7 +272,7 @@ Both image dimensions must be divisible by 8 for Stable Diffusion training.
 ## 3. Train the tiny backend
 
 ```bash
-python main.py train --config configs/tiny.yaml --data data/panoramas --output outputs/tiny --steps 1000
+python main.py train --config configs/tiny.yaml --data dataset/prepared/panoramas --output outputs/tiny --steps 1000
 ```
 
 This backend uses a compact UNet and deterministic four-channel image codec. It is useful for testing datasets, losses, checkpoints, and CLI workflows on CPU.
@@ -217,7 +280,7 @@ This backend uses a compact UNet and deterministic four-channel image codec. It 
 Run the 12-channel version without masks:
 
 ```bash
-python main.py train --config configs/tiny.yaml --data data/panoramas --output outputs/tiny-12ch --steps 1000 --no-masks
+python main.py train --config configs/tiny.yaml --data dataset/prepared/panoramas --output outputs/tiny-12ch --steps 1000 --no-masks
 ```
 
 ## 4. Verify the real Diffusers backend
@@ -225,8 +288,8 @@ python main.py train --config configs/tiny.yaml --data data/panoramas --output o
 Before downloading the full Stable Diffusion 1.5 weights, run the small safetensors-based integration model:
 
 ```bash
-python main.py prepare --panoramas res/output.jpg --output data/sd-tiny --width 64 --height 64 --samples-per-image 2 --validation-fraction 0.5
-python main.py train --config configs/sd-tiny.yaml
+python main.py prepare --panoramas res/output.jpg --output dataset/prepared/sd-tiny --width 64 --height 64 --samples-per-image 2 --validation-fraction 0.5
+python main.py train --config configs/sd-tiny.yaml --data dataset/prepared/sd-tiny
 ```
 
 This configuration downloads a small testing model and performs real `AutoencoderKL`, CLIP, and `UNet2DConditionModel` forward/backward passes. It verifies dependency compatibility and the 14-channel input layer, but its weights are not intended for visual-quality evaluation.
@@ -236,7 +299,7 @@ This configuration downloads a small testing model and performs real `Autoencode
 Prepare the dataset at the resolution configured in `configs/sd15.yaml`, then run:
 
 ```bash
-python main.py train --config configs/sd15.yaml
+python main.py train --config configs/sd15.yaml --data dataset/prepared/panoramas
 ```
 
 The default configuration uses:
@@ -284,7 +347,7 @@ Checkpoints include:
 ## 7. Evaluate a checkpoint
 
 ```bash
-python main.py evaluate --checkpoint outputs/sd15/best --data data/panoramas --split val --batches 8 --output outputs/sd15/evaluation.json --device cuda
+python main.py evaluate --checkpoint outputs/sd15/best --data dataset/prepared/panoramas --split val --batches 8 --output outputs/sd15/evaluation.json --device cuda
 ```
 
 Evaluation writes:

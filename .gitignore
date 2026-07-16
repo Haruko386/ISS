@@ -10,6 +10,8 @@ build/
 
 # Generated datasets, runs, and model weights
 data/
+dataset/*
+!dataset/.placeholder
 outputs/
 runs/
 checkpoints/
@@ -17,4 +19,3 @@ checkpoints/
 *.pth
 *.ckpt
 *.safetensors
-
