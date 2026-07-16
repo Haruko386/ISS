@@ -1,6 +1,6 @@
 numpy>=1.26,<3
 opencv-python-headless>=5.0.0.93,<6
-Pillow>=10,<13
+Pillow>=12.3.0,<13
 PyYAML>=6,<7
 torch>=2.2,<3
 
