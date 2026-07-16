@@ -1,107 +1,188 @@
-# StitchDiff：几何引导的扩散图像拼接
+# StitchDiff
 
-这是一个可以直接运行的“两阶段”图像拼接原型：
+StitchDiff is a geometry-guided conditional diffusion project for stitching two overlapping images into one panorama.
 
-1. SIFT/ORB + RANSAC 单应性把两张输入图像 warp 到同一个全景画布；
-2. 条件 latent diffusion 消除接缝、曝光差异和小范围重影，同时尽量保持单图覆盖区域不变。
+The pipeline has two stages:
 
-它参考了 [Haruko386/ApDepth](https://github.com/Haruko386/ApDepth) 中“扩展 Stable Diffusion UNet 输入层并拼接多路 latent 条件”的思路，但针对拼接任务使用正确的扩散训练目标：
+1. SIFT/ORB feature matching, RANSAC homography estimation, warping, masks, and a coarse feather-blended panorama.
+2. A conditional latent diffusion UNet that uses the aligned left and right images to remove seams, exposure differences, and small residual misalignments.
+
+The multi-latent input design is inspired by [Haruko386/ApDepth](https://github.com/Haruko386/ApDepth).
+
+## Model architecture
+
+The default model uses 14 input channels:
 
 ```text
-14 通道默认模型：
-[noisy_target(4), left_canvas(4), right_canvas(4), left_mask(1), right_mask(1)]
-
-12 通道消融模型：
-[noisy_target(4), left_canvas(4), right_canvas(4)]
+noisy target latent    4 channels
+left image latent      4 channels
+right image latent     4 channels
+left valid mask        1 channel
+right valid mask       1 channel
+---------------------------------
+total                  14 channels
 ```
 
-扩展预训练 `conv_in` 时只复制前四个 noisy-target 权重，新增条件通道为零初始化。训练时冻结 VAE、使用预训练 CLIP 的空文本 embedding，只更新 UNet。
+A 12-channel ablation is also supported:
 
-## 现在能做什么
+```text
+[noisy target latent (4), left latent (4), right latent (4)]
+```
 
-- 对未对齐的图片执行特征匹配、RANSAC、单应性 warp 和 feather blend；
-- 保存左右独立画布、有效区域 mask、接缝 mask 和粗拼接图；
-- 从完整全景图自动合成带曝光、色彩与少量残余偏移的训练三元组；
-- 使用标准随机时间步噪声预测训练 12/14 通道扩散网络；
-- 同时优化 diffusion、重建、接缝、梯度和内容保持损失；
-- 定期验证 MAE、接缝 MAE、重叠区 MAE、PSNR，并保存 `best` checkpoint；
-- 保存 optimizer、GradScaler 和随机数状态，可从 checkpoint 继续训练；
-- 以 tiny 后端离线跑通 CPU smoke test；
-- 切换 Stable Diffusion 1.5/2.1 VAE 和 UNet 做正式微调；
-- 推理后把单一来源区域原样贴回，只让生成模型主要处理重叠区。
+During training, the dataset ground-truth panorama is encoded and noised:
 
-`tiny` 是验证数据流和研究假设的轻量真实扩散模型，不使用预训练生成先验，因此少量训练不会产出高质量全景图。视觉质量实验应使用 `stable-diffusion` 后端和足够的数据。
+```text
+GT panorama -> VAE -> z0 -> add random noise at timestep t -> zt
 
-## 安装
+UNet input:  [zt, left_latent, right_latent, masks]
+UNet target: sampled noise epsilon
+```
 
-建议使用 Python 3.10～3.12 的新环境：
+The primary objective is diffusion noise-prediction MSE. The decoded predicted `x0` is additionally supervised with reconstruction, seam, gradient, and content-preservation losses against the GT panorama.
+
+During inference, two modes are available:
+
+- Practical refinement mode: start from a noised coarse panorama and preserve pixels outside the seam region.
+- Pure diffusion mode: start from random latent noise and generate the complete output from the left/right conditions.
+
+## Requirements
+
+- Python 3.10-3.12
+- PyTorch 2.2 or newer
+- A CUDA GPU is strongly recommended for full Stable Diffusion training
+- CPU execution is supported by the tiny smoke-test configurations
+
+## Installation
+
+Create a virtual environment.
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
+
+Linux or macOS:
 
 ```bash
 python -m venv .venv
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 python -m pip install --upgrade pip
+```
+
+Install the base dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-如果要微调 Stable Diffusion：
+Install the Stable Diffusion dependencies when using `configs/sd-tiny.yaml` or `configs/sd15.yaml`:
 
 ```bash
 pip install -r requirements-sd.txt
 ```
 
-依赖将 Diffusers 限制在已验证的 `<0.36` 范围；实测 0.39 的新版 attention dispatch 无法被 Torch 2.4 的自定义算子解析器加载。项目已用 Diffusers 0.35.2 做真实 14 通道前向和反向验证。
+Diffusers is restricted to the tested `<0.36` range. Diffusers 0.35.2 has been verified with the project's PyTorch 2.4 environment.
 
-检查环境：
+Optionally install the project as a command-line package:
+
+```bash
+pip install -e .
+stitchdiff doctor
+```
+
+Without editable installation, use `python main.py` for every command.
+
+## Check the environment
 
 ```bash
 python main.py doctor
 ```
 
-## 一条命令跑通
+This reports the Python, PyTorch, OpenCV, Diffusers, Transformers, and Accelerate versions, CUDA availability, and the selected device.
 
-仓库自带 `res/1.jpg` 和 `res/2.jpg`。下面的命令会依次完成对齐、生成小数据集、训练 tiny 模型并推理：
+## Quick start
+
+The repository includes `res/1.jpg` and `res/2.jpg`. Run the complete CPU pipeline with:
 
 ```bash
 python main.py demo
 ```
 
-CPU 默认只训练 4 步，用于确认整个工程可运行。主要输出：
+The demo performs alignment, creates a synthetic training set, trains the tiny diffusion model for a few steps, and runs inference.
+
+Generated files are written to:
 
 ```text
 outputs/demo/
-├── alignment/             # 几何阶段的双画布、mask、粗拼接
-├── data/                  # 自动生成的训练三元组
-├── training/final/        # tiny checkpoint
-├── stitched.png           # 扩散结果
-└── stitched_coarse.png    # 传统几何基线
+|-- alignment/             aligned canvases, masks, and coarse panorama
+|-- data/                  generated training triplets and manifest
+|-- training/
+|   |-- best/              lowest validation seam MAE checkpoint
+|   |-- final/             final checkpoint
+|   |-- validation/        left/right/coarse/prediction/GT previews
+|   `-- metrics.jsonl      training and validation metrics
+|-- stitched.png           diffusion result
+`-- stitched_coarse.png    geometry-only baseline
 ```
 
-## 分步使用
+The tiny backend verifies the full data and diffusion pipeline. It is not a pretrained image generator and is not intended to produce high-quality results after only a few steps.
 
-### 1. 几何对齐
+## Command overview
+
+```text
+doctor      inspect the runtime environment
+align       align two input images onto a shared panorama canvas
+prepare     generate left/right/GT training triplets from panoramas
+train       train or resume a 12/14-channel diffusion model
+evaluate    evaluate a checkpoint on a train or validation split
+infer       align and stitch a pair using a trained checkpoint
+demo        run the complete tiny pipeline
+```
+
+Show all options with:
 
 ```bash
-python main.py align \
-  --left res/1.jpg \
-  --right res/2.jpg \
-  --output outputs/alignment
+python main.py --help
+python main.py train --help
+python main.py infer --help
 ```
 
-若可靠匹配不足，程序会明确报错，不会静默写出错误的巨大画布。对于重复纹理、重叠过少或大视差场景，应先换用更强的几何模块/光流，再把结果整理成同样的左右画布与 mask。
-
-### 2. 从完整全景图构造数据
+## 1. Align two images
 
 ```bash
-python main.py prepare \
-  --panoramas path/to/panorama_folder \
-  --output data/panoramas \
-  --width 1024 \
-  --height 512 \
-  --samples-per-image 16
+python main.py align --left res/1.jpg --right res/2.jpg --output outputs/alignment
 ```
 
-生成的 `manifest.jsonl` 每行包括：
+The alignment directory contains:
+
+```text
+left.png
+right.png
+left_mask.png
+right_mask.png
+seam_mask.png
+coarse.png
+alignment.json
+```
+
+`left.png` and `right.png` are independent images warped onto the same panorama canvas. Empty regions remain invalid according to their masks.
+
+Alignment fails with an explicit error when there are not enough reliable matches or when the estimated canvas is unreasonably large. Large parallax scenes may require optical flow or a mesh-warp alignment module before diffusion refinement.
+
+## 2. Prepare a training dataset
+
+Create training triplets from one complete panorama or a directory of panoramas:
+
+```bash
+python main.py prepare --panoramas path/to/panoramas --output data/panoramas --width 1024 --height 512 --samples-per-image 16
+```
+
+The generator creates overlapping left/right conditions, masks, a GT panorama, exposure and color changes, and small residual shifts.
+
+The generated `manifest.jsonl` uses this format:
 
 ```json
 {
@@ -115,120 +196,242 @@ python main.py prepare \
 }
 ```
 
-真实数据也可以直接按这个格式组织。所有图片必须对应同一个目标画布；原始未对齐双图应先做几何预处理。
+Real datasets can use the same manifest format. Every left image, right image, mask, and target must use the same canvas size. Raw unaligned pairs should be geometrically aligned before being added to the manifest.
 
-### 3. 训练离线 tiny 后端
-
-```bash
-python main.py train \
-  --config configs/tiny.yaml \
-  --data data/panoramas \
-  --output outputs/tiny \
-  --steps 1000
-```
-
-训练日志会逐行写入 `metrics.jsonl`；验证预览按“左图、右图、粗拼接、预测、GT”的顺序保存到 `validation/`。`best/` 以最低接缝 MAE 为准，`final/` 是最后一步。
-
-从中断处恢复，并把总训练步数提高到 2000：
+Useful preparation options:
 
 ```bash
-python main.py train \
-  --resume outputs/tiny/checkpoint-001000 \
-  --steps 2000
+python main.py prepare --panoramas path/to/panoramas --output data/panoramas --width 512 --height 256 --samples-per-image 32 --validation-fraction 0.1 --residual-shift 2 --seed 42
 ```
 
-恢复会读取 checkpoint 附近的配置，也可以显式传入 `--config`。`--steps` 表示目标总 optimizer step，而不是在原 checkpoint 之后额外运行的步数。梯度累积现在也按 optimizer step 计数。
+Both image dimensions must be divisible by 8 for Stable Diffusion training.
 
-运行 12 通道消融实验：
+## 3. Train the tiny backend
 
 ```bash
-python main.py train --config configs/tiny.yaml --data data/panoramas --no-masks
+python main.py train --config configs/tiny.yaml --data data/panoramas --output outputs/tiny --steps 1000
 ```
 
-### 4. 正式微调 Stable Diffusion
+This backend uses a compact UNet and deterministic four-channel image codec. It is useful for testing datasets, losses, checkpoints, and CLI workflows on CPU.
 
-编辑 `configs/sd15.yaml` 中的模型名、分辨率和数据路径，然后运行：
+Run the 12-channel version without masks:
+
+```bash
+python main.py train --config configs/tiny.yaml --data data/panoramas --output outputs/tiny-12ch --steps 1000 --no-masks
+```
+
+## 4. Verify the real Diffusers backend
+
+Before downloading the full Stable Diffusion 1.5 weights, run the small safetensors-based integration model:
+
+```bash
+python main.py prepare --panoramas res/output.jpg --output data/sd-tiny --width 64 --height 64 --samples-per-image 2 --validation-fraction 0.5
+python main.py train --config configs/sd-tiny.yaml
+```
+
+This configuration downloads a small testing model and performs real `AutoencoderKL`, CLIP, and `UNet2DConditionModel` forward/backward passes. It verifies dependency compatibility and the 14-channel input layer, but its weights are not intended for visual-quality evaluation.
+
+## 5. Train Stable Diffusion 1.5
+
+Prepare the dataset at the resolution configured in `configs/sd15.yaml`, then run:
 
 ```bash
 python main.py train --config configs/sd15.yaml
 ```
 
-在下载完整 SD 1.5 前，可以先用 safetensors 格式的 17.9 MB 测试模型验证本机 Diffusers 路径：
+The default configuration uses:
+
+- `stable-diffusion-v1-5/stable-diffusion-v1-5`
+- 512 x 1024 training images
+- batch size 1 with four-step gradient accumulation
+- FP16 CUDA training
+- gradient checkpointing
+- channels-last memory format
+- 20,000 optimizer steps
+
+Start with 256 x 512 if GPU memory is limited. Update both the dataset preparation resolution and `configs/sd15.yaml`.
+
+Only the VAE and empty CLIP conditioning are reused from Stable Diffusion. The VAE is frozen and only the UNet is optimized. The original four noisy-latent input weights are preserved, while the left/right/mask condition channels are zero-initialized.
+
+SDXL is not currently supported because it requires additional text and size conditioning.
+
+## 6. Resume training
+
+Resume from a periodic checkpoint, a `final` directory, or a run directory containing `final`:
 
 ```bash
-python main.py prepare \
-  --panoramas res/output.jpg \
-  --output data/sd-tiny \
-  --width 64 --height 64 \
-  --samples-per-image 2 \
-  --validation-fraction 0.5
-
-python main.py train --config configs/sd-tiny.yaml
+python main.py train --resume outputs/sd15/checkpoint-010000 --steps 20000
 ```
 
-该配置会真实加载 VAE、CLIP 和 `UNet2DConditionModel` 并执行反向传播，但测试权重不具备生成质量，仅用于依赖和结构 smoke test。
+`--steps` is the target total number of optimizer steps. It is not the number of extra steps to add after the checkpoint.
 
-推荐先用 256×512 确认显存和收敛，再提高到 512×1024。默认配置面向 SD 1.5/2.1 的 `AutoencoderKL + UNet2DConditionModel`，没有实现 SDXL 的额外文本/尺寸条件。下载受限时，可把 `pretrained_model` 改成本地 Diffusers 模型目录。
-
-`configs/sd15.yaml` 默认启用 gradient checkpointing 和 channels-last。xFormers 默认关闭；确认本机 PyTorch/CUDA 与 xFormers 版本兼容后，可设置 `enable_xformers: true`。这些选项遵循 Diffusers 的 [模型 API](https://huggingface.co/docs/diffusers/api/models/overview) 和 [内存优化说明](https://huggingface.co/docs/diffusers/optimization/memory)。
-
-### 5. 推理
+Override the output directory or validation interval if needed:
 
 ```bash
-python main.py infer \
-  --checkpoint outputs/tiny/final \
-  --left res/1.jpg \
-  --right res/2.jpg \
-  --output outputs/result.png
+python main.py train --resume outputs/sd15/checkpoint-010000 --output outputs/sd15-resumed --steps 20000 --validation-every 250
 ```
 
-默认启用 `--preserve-known`：保留粗拼接的非接缝区域，只在接缝带软融合扩散结果。若要观察纯生成结果，可传 `--no-preserve-known`。
+Checkpoints include:
 
-推理默认还会把粗拼接作为 img2img 初值（`strength` 见配置）：`0` 完全保留粗拼接，`1` 从纯随机噪声生成。未充分训练的 tiny smoke test 建议使用 0.05～0.1；充分训练的 Stable Diffusion 模型可逐步提高，或使用 `--strength 1.0` 验证纯条件生成能力。
+- model weights
+- optimizer state
+- GradScaler state
+- Python, NumPy, PyTorch, and CUDA random states
+- current optimizer step
+- best validation seam MAE
+- complete YAML configuration
 
-### 6. 评估 checkpoint
+## 7. Evaluate a checkpoint
 
 ```bash
-python main.py evaluate \
-  --checkpoint outputs/tiny/best \
-  --data data/panoramas \
-  --split val \
-  --batches 8 \
-  --output outputs/tiny/evaluation.json
+python main.py evaluate --checkpoint outputs/sd15/best --data data/panoramas --split val --batches 8 --output outputs/sd15/evaluation.json --device cuda
 ```
 
-命令会写出 JSON 指标和同名 PNG 对比图。PSNR 和 MAE 使用 `[0,1]` 像素尺度；模型选择重点看 `seam_mae`，同时观察 `overlap_mae`，避免只修接缝却破坏整个重叠区域。
+Evaluation writes:
 
-## 损失函数
+- `evaluation.json` with MAE, seam MAE, overlap MAE, and PSNR
+- `evaluation.png` containing left, right, coarse, prediction, and GT images
+
+`seam_mae` is the primary checkpoint-selection metric. Check `overlap_mae` as well to ensure that seam repair is not damaging the complete overlap region.
+
+## 8. Run inference
+
+### Practical geometry-guided refinement
+
+This is the default and most stable mode. It starts from a noised coarse panorama and preserves coarse pixels outside the seam-repair band.
+
+```bash
+python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/result.png --device cuda
+```
+
+The configured diffusion `strength` controls how much noise is added to the coarse initialization:
+
+- `0.0`: return the coarse panorama
+- `0.1-0.4`: conservative seam refinement
+- `1.0`: ignore the coarse initialization and start from pure random noise
+
+Override it at runtime:
+
+```bash
+python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/result.png --strength 0.35 --steps 30 --device cuda
+```
+
+### Pure-noise conditional generation
+
+To use exactly two reference images plus a pure random-noise target latent:
+
+```bash
+python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/pure-diffusion.png --strength 1.0 --no-preserve-known --device cuda
+```
+
+With these two flags:
+
+- The denoising target starts from pure random latent noise.
+- The saved image is the model's complete decoded output and is not blended with the coarse panorama.
+
+### Reuse an existing alignment
+
+Avoid recomputing feature matching by passing a directory created by `align`:
+
+```bash
+python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --aligned-dir outputs/alignment --output outputs/result.png --device cuda
+```
+
+The left and right paths are still required by the CLI, but the aligned canvases and masks are loaded from `--aligned-dir`.
+
+## Configuration files
+
+Three ready-to-use configurations are included:
+
+| File | Purpose | Expected hardware |
+|---|---|---|
+| `configs/tiny.yaml` | Fast end-to-end pipeline and dataset debugging | CPU or GPU |
+| `configs/sd-tiny.yaml` | Real Diffusers/VAE/CLIP/UNet integration smoke test | CPU or GPU |
+| `configs/sd15.yaml` | Full Stable Diffusion 1.5 fine-tuning | CUDA GPU |
+
+Important fields:
+
+```yaml
+model:
+  backend: stable-diffusion
+  pretrained_model: stable-diffusion-v1-5/stable-diffusion-v1-5
+  use_masks: true
+  gradient_checkpointing: true
+  enable_xformers: false
+  channels_last: true
+
+train:
+  max_steps: 20000
+  grad_accumulation: 4
+  validation_every: 500
+  mixed_precision: fp16
+
+diffusion:
+  inference_steps: 30
+  strength: 0.35
+```
+
+Enable xFormers only after installing a version compatible with the local PyTorch and CUDA versions:
+
+```yaml
+model:
+  enable_xformers: true
+```
+
+## Losses
 
 ```text
-L = L_diff
-  + λ_rec      L_reconstruction
-  + λ_seam     L_seam
-  + λ_grad     L_gradient
-  + λ_preserve L_content-preservation
+L = lambda_diff     * L_diffusion
+  + lambda_rec      * L_reconstruction
+  + lambda_seam     * L_seam
+  + lambda_grad     * L_gradient
+  + lambda_preserve * L_content_preservation
 ```
 
-- `L_diff`：标准噪声预测 MSE；
-- `L_reconstruction`：预测 `x0` 解码后与 GT 的 masked L1；
-- `L_seam`：只在接缝带计算的 L1；
-- `L_gradient`：水平/垂直梯度连续性；
-- `L_preserve`：只在单图覆盖区约束输出接近输入。
+Loss weights are configured in the YAML `loss` section. Pixel-space losses require decoding the predicted clean latent and increase memory usage. If full-resolution training runs out of memory, first reduce resolution or set the pixel loss weights to zero for a diffusion-only warm-up stage.
 
-权重位于 YAML 配置的 `loss` 段。高分辨率 SD 训练若显存不足，可先把像素损失权重设为 0，仅训练 diffusion loss，再在第二阶段打开区域损失。
+## Tests
 
-## 测试
+Install the development dependencies and run:
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
 
-测试覆盖已知单应性画布、合成数据、14 通道训练/采样、12 通道消融、预训练 `conv_in` 的零初始化规则、SD 组件接线、显存优化开关，以及训练恢复/验证/best checkpoint。
+When the Stable Diffusion dependencies are installed, the tests also create a real Diffusers conditional UNet, expand it to 14 channels, and run forward/backward propagation.
 
-## 已知边界
+## Troubleshooting
 
-- 单应性适用于相机中心接近、场景近似平面或远景为主的情况；大视差需要光流或网格 warp。
-- 扩散模型可能生成视觉自然但不真实的结构，文字、建筑直线和移动物体尤其需要内容保持与后处理。
-- 当前像素精修采用“单来源区域硬保持”，尚未加入可训练的 Restormer/残差 refinement 网络。
-- 合成裁剪数据不能代替真实多视角训练对；正式实验应混入真实相机数据。
+### CUDA was requested but is unavailable
+
+Run `python main.py doctor`. Install a CUDA-enabled PyTorch build or change the configuration to `device: cpu` for smoke testing.
+
+### Out of GPU memory
+
+- Lower `image_height` and `image_width`.
+- Keep `batch_size: 1` and increase `grad_accumulation`.
+- Keep `gradient_checkpointing: true`.
+- Use FP16 on CUDA.
+- Set reconstruction, seam, gradient, and preservation loss weights to zero during an initial diffusion-only stage.
+- Enable xFormers only if a compatible build is available.
+
+### Alignment cannot find enough matches
+
+Use input images with more overlap or texture. Homography alignment is not sufficient for large parallax, repeated patterns, moving objects, or very small overlap regions.
+
+### Model download problems
+
+Set `model.pretrained_model` to a complete local Diffusers model directory. Prefer safetensors checkpoints. The official SD 1.5 repository contains `vae`, `unet`, `tokenizer`, and `text_encoder` subdirectories required by this project.
+
+### Windows Hugging Face cache warning
+
+Hugging Face may warn that symlinks are unavailable. Downloads still work but may consume more disk space. Enabling Windows Developer Mode allows the cache to use symlinks.
+
+## Current limitations
+
+- Homography alignment cannot fully solve large parallax.
+- Diffusion output may look plausible while changing real scene content.
+- Text, building edges, and moving objects remain difficult.
+- Synthetic panorama crops do not replace real multi-view training pairs.
+- The project does not yet include a trainable pixel-space refinement network.
