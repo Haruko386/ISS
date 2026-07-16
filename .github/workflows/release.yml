@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Check out the tagged revision
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -95,7 +95,7 @@ jobs:
 
     steps:
       - name: Check out the tagged revision
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Normalize the container image name
         id: image
