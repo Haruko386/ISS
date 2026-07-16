@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from .config import ProjectConfig, save_config
 from .data import StitchTripletDataset
 from .metrics import evaluate_model
-from .model import DiffusionStitcher
+from .model import ISSModel
 
 
 def resolve_device(requested: str = "auto") -> torch.device:
@@ -63,7 +63,7 @@ def _safe_torch_load(path: Path) -> dict[str, Any]:
         return torch.load(path, map_location="cpu")
 
 
-class StitchTrainer:
+class ISSTrainer:
     def __init__(
         self,
         config: ProjectConfig,
@@ -78,7 +78,7 @@ class StitchTrainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.output_dir / "metrics.jsonl"
         save_config(config, self.output_dir / "config.yaml")
-        self.model = DiffusionStitcher(config.model, config.diffusion).to(self.device)
+        self.model = ISSModel(config.model, config.diffusion).to(self.device)
         self.optimizer = AdamW(
             self.model.trainable_parameters(),
             lr=config.train.learning_rate,

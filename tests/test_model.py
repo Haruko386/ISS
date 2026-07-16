@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from stitchdiff.config import DiffusionConfig, LossConfig, ModelConfig
-from stitchdiff.diffusion import LinearNoiseScheduler
-from stitchdiff.model import (
-    DiffusionStitcher,
+from iss.config import DiffusionConfig, LossConfig, ModelConfig
+from iss.diffusion import LinearNoiseScheduler
+from iss.model import (
+    ISSModel,
     configure_unet_memory,
     expand_unet_conv_in,
 )
@@ -55,7 +55,7 @@ def _batch(batch_size: int = 1):
 
 
 def test_tiny_training_loss_and_sampling():
-    model = DiffusionStitcher(
+    model = ISSModel(
         ModelConfig(backend="tiny", use_masks=True, base_channels=8, latent_downsample=4),
         DiffusionConfig(train_timesteps=10, inference_steps=2),
     )
@@ -76,7 +76,7 @@ def test_tiny_training_loss_and_sampling():
 
 
 def test_twelve_channel_ablation():
-    model = DiffusionStitcher(
+    model = ISSModel(
         ModelConfig(backend="tiny", use_masks=False, base_channels=8),
         DiffusionConfig(train_timesteps=10),
     )
@@ -194,7 +194,7 @@ def test_stable_diffusion_component_wiring_without_weights(monkeypatch):
         "transformers",
         SimpleNamespace(CLIPTextModel=FakeTextEncoder, CLIPTokenizer=FakeTokenizer),
     )
-    model = DiffusionStitcher(
+    model = ISSModel(
         ModelConfig(backend="stable-diffusion", use_masks=True),
         DiffusionConfig(train_timesteps=10),
     )

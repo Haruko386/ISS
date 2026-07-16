@@ -5,15 +5,15 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from stitchdiff.config import (
+from iss.config import (
     DataConfig,
     DiffusionConfig,
     ModelConfig,
     ProjectConfig,
     TrainConfig,
 )
-from stitchdiff.data import prepare_synthetic_dataset
-from stitchdiff.trainer import StitchTrainer
+from iss.data import prepare_synthetic_dataset
+from iss.trainer import ISSTrainer
 
 
 def _config(data: Path, output: Path, steps: int) -> ProjectConfig:
@@ -54,15 +54,15 @@ def test_training_resume_validation_and_best_checkpoint(tmp_path: Path):
         residual_shift=0,
     )
     output = tmp_path / "run"
-    first = StitchTrainer(_config(data, output, 1)).train()
+    first = ISSTrainer(_config(data, output, 1)).train()
 
     fork_output = tmp_path / "forked-run"
-    forked = StitchTrainer(_config(data, fork_output, 2), resume_from=first)
+    forked = ISSTrainer(_config(data, fork_output, 2), resume_from=first)
     assert math.isinf(forked.best_seam_mae)
     forked.train()
     assert (fork_output / "best" / "model.pt").exists()
 
-    resumed = StitchTrainer(_config(data, output, 2), resume_from=first)
+    resumed = ISSTrainer(_config(data, output, 2), resume_from=first)
     assert resumed.start_step == 1
     final = resumed.train()
     summary = json.loads((output / "training_summary.json").read_text(encoding="utf-8"))

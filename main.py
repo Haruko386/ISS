@@ -1,6 +1,6 @@
 """Repository entry point. See ``python main.py --help``."""
 
-from stitchdiff.cli import main
+from iss.cli import main
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import torch
 
-from .model import DiffusionStitcher
+from .model import ISSModel
 
 
 def coarse_from_conditions(batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -53,7 +53,7 @@ def image_metrics(
 
 @torch.no_grad()
 def evaluate_model(
-    model: DiffusionStitcher,
+    model: ISSModel,
     batches: Iterable[dict[str, torch.Tensor]],
     *,
     device: torch.device,
@@ -99,4 +99,3 @@ def evaluate_model(
     if count == 0:
         raise ValueError("Validation loader produced no batches.")
     return {key: value / count for key, value in totals.items()}, preview
-

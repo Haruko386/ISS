@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from stitchdiff.alignment import align_pair
+from iss.alignment import align_pair
 
 
 def test_known_homography_creates_common_canvas():
@@ -18,4 +18,3 @@ def test_known_homography_creates_common_canvas():
     assert result.left_mask.max() == 255
     assert result.right_mask.max() == 255
     assert np.logical_and(result.left_mask > 0, result.right_mask > 0).any()
-

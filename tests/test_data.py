@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from stitchdiff.data import StitchTripletDataset, prepare_synthetic_dataset
+from iss.data import StitchTripletDataset, prepare_synthetic_dataset
 
 
 def test_prepare_and_load_dataset(tmp_path: Path):
@@ -29,4 +29,3 @@ def test_prepare_and_load_dataset(tmp_path: Path):
     assert sample["left_mask"].shape == (1, 32, 64)
     assert sample["target"].min() >= -1.0
     assert sample["target"].max() <= 1.0
-

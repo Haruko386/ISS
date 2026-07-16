@@ -1,6 +1,6 @@
-# StitchDiff
+# ISS
 
-StitchDiff is a geometry-guided conditional diffusion project for stitching two overlapping images into one panorama.
+ISS is a geometry-guided conditional diffusion project for stitching two overlapping images into one panorama.
 
 The pipeline has two stages:
 
@@ -90,7 +90,7 @@ Optionally install the project as a command-line package:
 
 ```bash
 pip install -e .
-stitchdiff doctor
+iss doctor
 ```
 
 Without editable installation, use `python main.py` for every command.
@@ -141,7 +141,7 @@ dataset/
 |-- .placeholder
 |-- raw/                         downloaded source panoramas
 |   `-- PanoHK360/
-`-- prepared/                    generated StitchDiff manifests and images
+`-- prepared/                    generated ISS manifests and images
     |-- panoramas/
     `-- sd-tiny/
 ```
@@ -150,7 +150,7 @@ The contents of `dataset/` are ignored by Git except for `.placeholder`.
 
 ### Recommended: PanoHK360 RGB panoramas
 
-[PanoHK360](https://huggingface.co/datasets/adadai3132/PanoHK360) provides high-resolution equirectangular urban panoramas and is published under CC BY 4.0. StitchDiff needs only the RGB images in a `pano_raw` directory; do not pass its depth maps, normal maps, or perspective ROI crops to `prepare`.
+[PanoHK360](https://huggingface.co/datasets/adadai3132/PanoHK360) provides high-resolution equirectangular urban panoramas and is published under CC BY 4.0. ISS needs only the RGB images in a `pano_raw` directory; do not pass its depth maps, normal maps, or perspective ROI crops to `prepare`.
 
 Install the current Hugging Face CLI:
 

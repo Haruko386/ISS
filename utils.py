@@ -1,6 +1,6 @@
 """Backward-compatible exports for the original coursework repository."""
 
-from stitchdiff.alignment import (
+from iss.alignment import (
     AlignmentError,
     AlignmentResult,
     align_pair,

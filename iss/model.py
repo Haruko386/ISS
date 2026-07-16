@@ -200,7 +200,7 @@ def _gradient_l1(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     return F.l1_loss(pred_x, target_x) + F.l1_loss(pred_y, target_y)
 
 
-class DiffusionStitcher(nn.Module):
+class ISSModel(nn.Module):
     """Two-reference conditional latent diffusion model for image stitching."""
 
     def __init__(
@@ -271,7 +271,7 @@ class DiffusionStitcher(nn.Module):
         else:
             raise ValueError(f"Unknown model backend: {self.model_config.backend!r}")
 
-    def train(self, mode: bool = True) -> "DiffusionStitcher":
+    def train(self, mode: bool = True) -> "ISSModel":
         super().train(mode)
         if self.backend != "tiny":
             self.vae.eval()

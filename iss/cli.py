@@ -16,8 +16,8 @@ from .alignment import AlignmentError, load_and_align, save_alignment
 from .config import ProjectConfig, load_config, save_config
 from .data import StitchTripletDataset, prepare_synthetic_dataset
 from .metrics import evaluate_model
-from .model import DiffusionStitcher
-from .trainer import StitchTrainer, resolve_device, tensor_to_image
+from .model import ISSModel
+from .trainer import ISSTrainer, resolve_device, tensor_to_image
 
 
 def _rgb_tensor(image_bgr: np.ndarray, width: int, height: int) -> torch.Tensor:
@@ -108,7 +108,7 @@ def command_train(args: argparse.Namespace) -> int:
     _apply_train_overrides(config, args)
     if args.validation_every is not None:
         config.train.validation_every = args.validation_every
-    checkpoint = StitchTrainer(config, resume_from=args.resume).train()
+    checkpoint = ISSTrainer(config, resume_from=args.resume).train()
     print(f"training complete: {checkpoint}")
     return 0
 
@@ -119,7 +119,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
     if args.data:
         config.data.root = args.data
     device = resolve_device(args.device)
-    model = DiffusionStitcher(config.model, config.diffusion)
+    model = ISSModel(config.model, config.diffusion)
     model.load_model(model_path)
     model.to(device).eval()
     dataset = StitchTripletDataset(
@@ -205,7 +205,7 @@ def run_inference(
         seam_mask = alignment.seam_mask
 
     device = resolve_device(device_name)
-    model = DiffusionStitcher(config.model, config.diffusion)
+    model = ISSModel(config.model, config.diffusion)
     model.load_model(checkpoint)
     model.to(device).eval()
     width, height = config.data.image_width, config.data.image_height
@@ -306,7 +306,7 @@ def command_demo(args: argparse.Namespace) -> int:
     config.train.device = args.device
     config.train.checkpoint_every = 0
     save_config(config, root / "demo_config.yaml")
-    checkpoint = StitchTrainer(config).train()
+    checkpoint = ISSTrainer(config).train()
     final = run_inference(
         config,
         checkpoint,
@@ -347,8 +347,8 @@ def command_doctor(_: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="stitchdiff",
-        description="Geometry-guided conditional diffusion image stitching",
+        prog="iss",
+        description="ISS geometry-guided conditional diffusion image stitching",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

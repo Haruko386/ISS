@@ -3,7 +3,7 @@ import torch
 
 diffusers = pytest.importorskip("diffusers")
 
-from stitchdiff.model import configure_unet_memory, expand_unet_conv_in
+from iss.model import configure_unet_memory, expand_unet_conv_in
 
 
 def test_real_diffusers_unet_fourteen_channel_forward_backward():
