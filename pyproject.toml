@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ISS"
-version = "0.1.0"
+dynamic = ["version"]
 description = "ISS: geometry-guided conditional diffusion for two-image stitching"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,9 @@ iss = "iss.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["iss*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "iss._version.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

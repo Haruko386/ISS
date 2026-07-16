@@ -453,6 +453,59 @@ L = lambda_diff     * L_diffusion
 
 Loss weights are configured in the YAML `loss` section. Pixel-space losses require decoding the predicted clean latent and increase memory usage. If full-resolution training runs out of memory, first reduce resolution or set the pixel loss weights to zero for a diffusion-only warm-up stage.
 
+## Continuous integration and package releases
+
+The repository includes two GitHub Actions workflows:
+
+- `.github/workflows/ci.yml` runs on every branch push and pull request. It tests Python 3.10, 3.11, and 3.12, then builds and validates the wheel and source distribution.
+- `.github/workflows/release.yml` runs when a semantic version tag such as `v0.1.0` is pushed. It runs the tests again, creates a GitHub Release with the wheel and source distribution attached, and publishes a CPU container to GitHub Container Registry.
+
+GitHub Packages does not provide a PyPI-compatible registry. The installable Python distributions are therefore attached to GitHub Releases, while the GHCR container is the package shown in the repository's **Packages** section.
+
+### Create a release
+
+The package version has a single source of truth in `iss/_version.py`. Update it before creating the tag:
+
+```python
+__version__ = "0.2.0"
+```
+
+Commit the version change and push the matching tag:
+
+```bash
+git add iss/_version.py
+git commit -m "Release ISS 0.2.0"
+git tag v0.2.0
+git push origin HEAD
+git push origin v0.2.0
+```
+
+The release workflow rejects a tag when its version does not exactly match `iss/_version.py`. No custom publishing secret is required: the workflow uses the repository-scoped `GITHUB_TOKEN` with explicit `contents: write` and `packages: write` permissions.
+
+After the workflow succeeds:
+
+- `iss-0.2.0-py3-none-any.whl` and the source archive are available from the GitHub Release.
+- `ghcr.io/<owner>/<repository>:0.2.0` and `:latest` are available from GitHub Packages.
+
+Install a downloaded wheel with:
+
+```bash
+pip install iss-0.2.0-py3-none-any.whl
+```
+
+Run the published CPU image with:
+
+```bash
+docker pull ghcr.io/<owner>/<repository>:0.2.0
+docker run --rm ghcr.io/<owner>/<repository>:0.2.0 doctor
+```
+
+The container contains the base ISS dependencies and CPU PyTorch. Stable Diffusion extras and CUDA training environments should be installed separately on suitable GPU systems.
+
+If an organization policy restricts workflow tokens, allow GitHub Actions to create releases and write packages in the repository or organization Actions settings. The first GHCR package may also need its visibility changed to public if anonymous pulls are desired.
+
+Dependabot checks GitHub Actions, Python, and Docker dependencies weekly using `.github/dependabot.yml`.
+
 ## Tests
 
 Install the development dependencies and run:

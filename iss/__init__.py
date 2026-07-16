@@ -3,6 +3,7 @@
 from .alignment import AlignmentError, AlignmentResult, align_pair
 from .diffusion import LinearNoiseScheduler
 from .model import ISSModel, expand_unet_conv_in
+from ._version import __version__
 
 __all__ = [
     "AlignmentError",
@@ -12,5 +13,3 @@ __all__ = [
     "align_pair",
     "expand_unet_conv_in",
 ]
-
-__version__ = "0.1.0"
