@@ -74,6 +74,16 @@ class ISSTrainer:
         *,
         resume_from: str | Path | None = None,
     ) -> None:
+        """
+        Initialize the trainer, configure the execution environment, and prepare model and optimizer state.
+        
+        Parameters:
+            config (ProjectConfig): Training, model, diffusion, and data configuration.
+            resume_from (str | Path | None): Optional checkpoint path from which to resume training.
+        
+        Raises:
+            ValueError: If fp16 mixed-precision training is requested on a non-CUDA device.
+        """
         self.config = config
         self._validate_config()
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -131,6 +141,15 @@ class ISSTrainer:
             self.resume(resume_from)
 
     def _setup_distributed(self, requested_device: str) -> torch.device:
+        """
+        Configure the distributed process group and select the device for this trainer.
+        
+        Parameters:
+        	requested_device (str): Requested device name, such as `"auto"`, `"cuda"`, or `"cpu"`.
+        
+        Returns:
+        	torch.device: The device assigned to this process.
+        """
         if not self.distributed:
             return resolve_device(requested_device)
         if self.rank < 0 or self.rank >= self.world_size:
@@ -165,11 +184,19 @@ class ISSTrainer:
         return device
 
     def close(self) -> None:
+        """Release resources owned by the trainer's distributed process group."""
         if self._owns_process_group and dist.is_available() and dist.is_initialized():
             dist.destroy_process_group()
             self._owns_process_group = False
 
     def _validate_config(self) -> None:
+        """
+        Validate training, model, and image-dimension settings required by the trainer.
+        
+        Raises:
+            ValueError: If a training value is invalid, mixed precision is unsupported,
+                or Stable Diffusion image dimensions are not divisible by 8.
+        """
         train = self.config.train
         if train.max_steps < 1:
             raise ValueError("max_steps must be positive.")
@@ -188,6 +215,11 @@ class ISSTrainer:
                 raise ValueError("Stable Diffusion image dimensions must be divisible by 8.")
 
     def _autocast(self):
+        """Provide the configured automatic mixed-precision context for model operations.
+        
+        Returns:
+        	context_manager: A no-op context when automatic mixed precision is disabled; otherwise, a context configured for the trainer's device and precision.
+        """
         if not self.use_autocast:
             return nullcontext()
         return torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype)
@@ -199,6 +231,17 @@ class ISSTrainer:
         shuffle: bool,
         distributed: bool = True,
     ) -> DataLoader:
+        """
+        Create a data loader for the specified dataset split.
+        
+        Parameters:
+        	split (str): Dataset split to load.
+        	shuffle (bool): Whether to shuffle the samples.
+        	distributed (bool): Whether to use distributed sampling when distributed training is enabled.
+        
+        Returns:
+        	DataLoader: Configured data loader for the requested split.
+        """
         dataset = StitchTripletDataset(
             self.config.data.root,
             width=self.config.data.image_width,
@@ -228,12 +271,27 @@ class ISSTrainer:
         )
 
     def _append_metrics(self, payload: dict[str, Any]) -> None:
+        """
+        Append a metrics record to the metrics file on the main process.
+        
+        Parameters:
+        	payload (dict[str, Any]): Metrics data to serialize as a JSON line.
+        """
         if not self.is_main_process:
             return
         with self.metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _average_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
+        """
+        Average metric values across distributed processes.
+        
+        Parameters:
+        	metrics (dict[str, float]): Metric names and local values to average.
+        
+        Returns:
+        	dict[str, float]: The input metrics unchanged for non-distributed execution; otherwise, metrics averaged across all processes.
+        """
         if not self.distributed:
             return metrics
         keys = list(metrics)
@@ -247,6 +305,12 @@ class ISSTrainer:
         return {key: float(value) for key, value in zip(keys, values.tolist())}
 
     def _rng_state(self) -> dict[str, Any]:
+        """
+        Capture the current random number generator states.
+        
+        Returns:
+        	dict[str, Any]: Python, NumPy, and Torch CPU RNG states, plus CUDA RNG states when CUDA is available.
+        """
         state: dict[str, Any] = {
             "python": random.getstate(),
             "numpy": np.random.get_state(),
@@ -267,6 +331,16 @@ class ISSTrainer:
             torch.cuda.set_rng_state_all(state["cuda"])
 
     def save_checkpoint(self, step: int, label: str | None = None) -> Path:
+        """
+        Save the model, optimizer, training state, and random number generator states to a checkpoint.
+        
+        Parameters:
+            step (int): Training step associated with the checkpoint.
+            label (str | None): Optional directory label; defaults to a zero-padded step name.
+        
+        Returns:
+            Path: Directory containing the saved checkpoint.
+        """
         checkpoint_dir = self.output_dir / (label or f"checkpoint-{step:06d}")
         local_rng_state = self._rng_state()
         if self.distributed:
@@ -300,6 +374,15 @@ class ISSTrainer:
         return checkpoint_dir
 
     def resume(self, checkpoint: str | Path) -> None:
+        """
+        Resume training from a checkpoint and restore the trainer state.
+        
+        Parameters:
+            checkpoint (str | Path): Path to a checkpoint directory or an output directory containing a ``final`` checkpoint.
+        
+        Raises:
+            FileNotFoundError: If the checkpoint does not contain ``trainer_state.pt``.
+        """
         checkpoint = Path(checkpoint)
         if (checkpoint / "final" / "trainer_state.pt").exists():
             checkpoint = checkpoint / "final"
@@ -335,6 +418,17 @@ class ISSTrainer:
         *,
         save_best: bool = True,
     ) -> dict[str, float]:
+        """
+        Evaluate the model on a validation dataset and optionally save a checkpoint when seam MAE improves.
+        
+        Parameters:
+            step (int): Training step associated with the validation.
+            loader (DataLoader): Validation data loader.
+            save_best (bool): Whether to save a checkpoint when the seam MAE reaches a new best value.
+        
+        Returns:
+            dict[str, float]: Validation metrics.
+        """
         with self._autocast():
             metrics, preview = evaluate_model(
                 self.model,
@@ -361,12 +455,27 @@ class ISSTrainer:
         return metrics
 
     def train(self) -> Path:
+        """
+        Run the training process and release distributed resources when it finishes.
+        
+        Returns:
+        	Path: Path to the final training checkpoint.
+        """
         try:
             return self._train()
         finally:
             self.close()
 
     def _train(self) -> Path:
+        """
+        Run the training loop through the configured maximum step and save the final checkpoint.
+        
+        Returns:
+        	Path: Path to the final training checkpoint.
+        
+        Raises:
+        	ValueError: If the checkpoint's starting step is already at or beyond the configured maximum.
+        """
         config = self.config.train
         if self.start_step >= config.max_steps:
             raise ValueError(

@@ -10,6 +10,7 @@ DATA=""
 OUTPUT=""
 EXTRA_ARGS=()
 
+# usage prints command-line usage information and examples for the multi-GPU training script.
 usage() {
   cat <<'EOF'
 Usage:
