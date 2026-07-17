@@ -111,14 +111,40 @@ jobs:
 
       - name: Generate container metadata
         id: metadata
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ steps.image.outputs.name }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid semantic version: $version" >&2
+            exit 1
+          fi
+
+          major="${version%%.*}"
+          remainder="${version#*.}"
+          minor="${remainder%%.*}"
+          major_minor="${major}.${minor}"
+          created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${version}"
+            echo "${IMAGE_NAME}:${major_minor}"
+            echo "${IMAGE_NAME}:${major}"
+            echo "${IMAGE_NAME}:latest"
+            echo "EOF"
+
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.version=${version}"
+            echo "org.opencontainers.image.revision=${GITHUB_SHA}"
+            echo "org.opencontainers.image.created=${created}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and publish the CPU image
         uses: docker/build-push-action@v7
