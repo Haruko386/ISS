@@ -1,4 +1,4 @@
-# ISS
+<h1 align="center"><strong>ISS: Image Stiching Super based on diffusion model</strong></h1>
 
 ISS is a geometry-guided conditional diffusion project for stitching two overlapping images into one panorama.
 
