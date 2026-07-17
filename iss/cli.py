@@ -99,6 +99,15 @@ def _apply_train_overrides(config: ProjectConfig, args: argparse.Namespace) -> N
 
 
 def command_train(args: argparse.Namespace) -> int:
+    """
+    Train the stitching model using the selected configuration and command-line overrides.
+    
+    Parameters:
+    	args (argparse.Namespace): Command-line arguments containing configuration, resume, override, and validation settings.
+    
+    Returns:
+    	int: Exit status code, always 0 after training completes.
+    """
     if args.config:
         config = load_config(args.config)
     elif args.resume:
@@ -327,6 +336,12 @@ def command_demo(args: argparse.Namespace) -> int:
 
 
 def command_doctor(_: argparse.Namespace) -> int:
+    """
+    Report Python, library, and CUDA environment information as formatted JSON.
+    
+    Returns:
+    	int: Exit status 0.
+    """
     def installed(distribution: str) -> str | None:
         try:
             return version(distribution)
@@ -352,6 +367,12 @@ def command_doctor(_: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Create the command-line argument parser for the ISS image-stitching workflow.
+    
+    Returns:
+    	argparse.ArgumentParser: Parser configured with all supported subcommands and their arguments.
+    """
     parser = argparse.ArgumentParser(
         prog="iss",
         description="ISS geometry-guided conditional diffusion image stitching",

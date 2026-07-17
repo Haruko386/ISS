@@ -272,6 +272,15 @@ class ISSModel(nn.Module):
             raise ValueError(f"Unknown model backend: {self.model_config.backend!r}")
 
     def train(self, mode: bool = True) -> "ISSModel":
+        """
+        Set the model's training mode while keeping the VAE in evaluation mode for non-tiny backends.
+        
+        Args:
+            mode: Whether to enable training mode.
+        
+        Returns:
+            The model instance.
+        """
         super().train(mode)
         if self.backend != "tiny":
             self.vae.eval()
@@ -282,15 +291,29 @@ class ISSModel(nn.Module):
         batch: dict[str, torch.Tensor],
         weights: LossConfig | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Run the training forward pass.
-
-        Keeping the loss computation behind ``forward`` is important for
-        ``DistributedDataParallel``: DDP must observe every forward pass in
-        order to schedule gradient synchronization correctly.
+        """
+        Compute training losses for a batch.
+        
+        Parameters:
+            batch (dict[str, torch.Tensor]): Input tensors required for loss computation.
+            weights (LossConfig | None): Optional loss component weights.
+        
+        Returns:
+            dict[str, torch.Tensor]: Total loss and detached component losses.
         """
         return self.training_losses(batch, weights)
 
     def encode(self, image: torch.Tensor, *, sample_posterior: bool = False) -> torch.Tensor:
+        """
+        Encode an image into the model's latent representation.
+        
+        Parameters:
+            image (torch.Tensor): Input image tensor.
+            sample_posterior (bool): Whether to sample from the posterior instead of using its mode.
+        
+        Returns:
+            torch.Tensor: Encoded latent representation.
+        """
         if self.backend == "tiny":
             return self.vae.encode(image)
         posterior = self.vae.encode(image).latent_dist
