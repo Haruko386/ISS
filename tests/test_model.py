@@ -59,7 +59,9 @@ def test_tiny_training_loss_and_sampling():
         ModelConfig(backend="tiny", use_masks=True, base_channels=8, latent_downsample=4),
         DiffusionConfig(train_timesteps=10, inference_steps=2),
     )
-    losses = model.training_losses(_batch(), LossConfig())
+    # Exercise ``forward`` because DistributedDataParallel invokes the model
+    # through this entry point during training.
+    losses = model(_batch(), LossConfig())
     losses["loss"].backward()
     sample = model.sample(
         _batch()["left"],

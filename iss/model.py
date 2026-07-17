@@ -277,6 +277,19 @@ class ISSModel(nn.Module):
             self.vae.eval()
         return self
 
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        weights: LossConfig | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Run the training forward pass.
+
+        Keeping the loss computation behind ``forward`` is important for
+        ``DistributedDataParallel``: DDP must observe every forward pass in
+        order to schedule gradient synchronization correctly.
+        """
+        return self.training_losses(batch, weights)
+
     def encode(self, image: torch.Tensor, *, sample_posterior: bool = False) -> torch.Tensor:
         if self.backend == "tiny":
             return self.vae.encode(image)

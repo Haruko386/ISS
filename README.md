@@ -318,6 +318,38 @@ Only the VAE and empty CLIP conditioning are reused from Stable Diffusion. The V
 
 SDXL is not currently supported because it requires additional text and size conditioning.
 
+### Multi-GPU training on Linux
+
+Training supports PyTorch DistributedDataParallel (DDP): one process runs on each selected GPU, training samples are sharded between processes, and gradients are synchronized before every optimizer update. Use the included bash launcher to select any physical GPU IDs.
+
+Use GPU 0 and GPU 3:
+
+```bash
+bash script/train_multi_gpu.sh --gpus 0,3 --config configs/sd15.yaml --data dataset/prepared/panoramas --output outputs/sd15-2gpu
+```
+
+Use GPU 0, GPU 1, and GPU 3, with additional `iss train` options after `--`:
+
+```bash
+bash script/train_multi_gpu.sh --gpus 0,1,3 --config configs/sd15.yaml --data dataset/prepared/panoramas --output outputs/sd15-3gpu -- --steps 20000 --validation-every 500
+```
+
+The launcher sets `CUDA_VISIBLE_DEVICES` and derives the process count from `--gpus`. Selected physical devices are remapped to process-local CUDA indices, so keep `train.device: cuda` (or pass `--device cuda`) rather than using `cuda:3` in YAML.
+
+The equivalent command without the helper script is:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 torchrun --standalone --nnodes=1 --nproc_per_node=2 main.py train --config configs/sd15.yaml --data dataset/prepared/panoramas --device cuda
+```
+
+`train.batch_size` is the batch size **per GPU**. The effective global batch size is:
+
+```text
+batch_size_per_gpu * number_of_gpus * grad_accumulation
+```
+
+For example, `batch_size: 1`, three GPUs, and `grad_accumulation: 4` produce an effective batch size of 12. Only rank 0 writes logs, validation previews, and checkpoints. Checkpoints contain a random-number-generator state for every rank and can be resumed with the same launcher. Resuming with a different GPU count is supported, although the random stream cannot exactly reproduce the previous run.
+
 ## 6. Resume training
 
 Resume from a periodic checkpoint, a `final` directory, or a run directory containing `final`:
@@ -334,12 +366,19 @@ Override the output directory or validation interval if needed:
 python main.py train --resume outputs/sd15/checkpoint-010000 --output outputs/sd15-resumed --steps 20000 --validation-every 250
 ```
 
+Resume a multi-GPU run on selected cards:
+
+```bash
+bash script/train_multi_gpu.sh --gpus 0,3 --output outputs/sd15 -- --resume outputs/sd15/checkpoint-010000 --steps 20000
+```
+
 Checkpoints include:
 
 - model weights
 - optimizer state
 - GradScaler state
 - Python, NumPy, PyTorch, and CUDA random states
+- per-rank random states for distributed training
 - current optimizer step
 - best validation seam MAE
 - complete YAML configuration
@@ -522,6 +561,13 @@ When the Stable Diffusion dependencies are installed, the tests also create a re
 ### CUDA was requested but is unavailable
 
 Run `python main.py doctor`. Install a CUDA-enabled PyTorch build or change the configuration to `device: cpu` for smoke testing.
+
+### Multi-GPU launch fails or hangs
+
+- Launch through `torchrun`; running `python main.py train` directly remains single-process training.
+- Make sure the number of comma-separated IDs passed to `CUDA_VISIBLE_DEVICES` matches `--nproc_per_node`. The provided bash script calculates this automatically.
+- Do not run two jobs against the same output directory.
+- NCCL is used for CUDA DDP. Confirm that every selected GPU is visible with `nvidia-smi` and that the installed PyTorch build supports the system CUDA driver.
 
 ### Out of GPU memory
 

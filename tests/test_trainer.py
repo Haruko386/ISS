@@ -77,4 +77,6 @@ def test_training_resume_validation_and_best_checkpoint(tmp_path: Path):
     assert summary["start_step"] == 1
     assert summary["steps"] == 2
     assert summary["resumed_from"] == str(first)
+    assert summary["world_size"] == 1
+    assert summary["effective_batch_size"] == 1
     assert any(record["type"] == "validation" for record in metric_records)

@@ -108,8 +108,10 @@ def command_train(args: argparse.Namespace) -> int:
     _apply_train_overrides(config, args)
     if args.validation_every is not None:
         config.train.validation_every = args.validation_every
-    checkpoint = ISSTrainer(config, resume_from=args.resume).train()
-    print(f"training complete: {checkpoint}")
+    trainer = ISSTrainer(config, resume_from=args.resume)
+    checkpoint = trainer.train()
+    if trainer.is_main_process:
+        print(f"training complete: {checkpoint}")
     return 0
 
 
@@ -339,6 +341,10 @@ def command_doctor(_: argparse.Namespace) -> int:
         "transformers": installed("transformers"),
         "accelerate": installed("accelerate"),
         "cuda_available": torch.cuda.is_available(),
+        "cuda_device_count": torch.cuda.device_count(),
+        "cuda_devices": [
+            torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())
+        ],
         "recommended_device": str(resolve_device("auto")),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -381,7 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--output")
     train.add_argument("--steps", type=int)
     train.add_argument("--batch-size", type=int)
-    train.add_argument("--device")
+    train.add_argument(
+        "--device",
+        help="training device (use cuda/auto when launching multi-GPU with torchrun)",
+    )
     train.add_argument("--resume", help="checkpoint directory or run directory")
     train.add_argument("--validation-every", type=int)
     train.add_argument("--no-masks", action="store_true", help="use the 12-channel ablation")
