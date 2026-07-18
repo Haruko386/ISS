@@ -165,7 +165,10 @@ pip install -U huggingface_hub
 Download the filtered RGB panorama directory:
 
 ```bash
-hf download "hf://datasets/adadai3132/PanoHK360/R101%2020230413--filter/pano_raw/" --local-dir dataset/raw/PanoHK360
+hf download adadai3132/PanoHK360 \
+  --repo-type dataset \
+  --include "R101 20230413--filter/pano_raw/**" \
+  --local-dir dataset/raw/PanoHK360
 ```
 
 Convert the downloaded panoramas into this project's supervised training format:
@@ -181,8 +184,10 @@ Re-running `hf download` updates or resumes the local download. Read the dataset
 For a smaller pipeline experiment, the [Everloom/SUN360 mirror](https://huggingface.co/datasets/Everloom/SUN360) contains train and test image folders. Download only its RGB training directory so that auxiliary labels are not treated as GT images:
 
 ```bash
-hf download "hf://datasets/Everloom/SUN360/train/RGB/" --local-dir dataset/raw/SUN360
-python main.py prepare --panoramas dataset/raw/SUN360/train/RGB --output dataset/prepared/panoramas --width 512 --height 256 --samples-per-image 8 --validation-fraction 0.1 --seed 42
+hf download Everloom/SUN360 \
+  "train/RGB/" \
+  --repo-type dataset \
+  --local-dir dataset/raw/SUN360
 ```
 
 The mirror currently has no dataset card or declared license. Verify the original SUN360 usage terms before training or redistributing derived data. For a code-only smoke test with no external download, use `python main.py demo` instead.
@@ -203,6 +208,7 @@ Use source images that you are allowed to process. Wider equirectangular images 
 doctor      inspect the runtime environment
 align       align two input images onto a shared panorama canvas
 prepare     generate left/right/GT training triplets from panoramas
+prepare-udis copy/extract UDIS-D and convert pairs into ISS triplets
 train       train or resume a 12/14-channel diffusion model
 evaluate    evaluate a checkpoint on a train or validation split
 infer       align and stitch a pair using a trained checkpoint
@@ -273,6 +279,39 @@ python main.py prepare --panoramas dataset/raw/custom --output dataset/prepared/
 
 Both image dimensions must be divisible by 8 for Stable Diffusion training.
 
+### UDIS-D pairs
+
+UDIS-D contains `input1/input2` image pairs but does not include a true GT
+panorama. ISS can still use it for diffusion seam/refinement fine-tuning by
+copying the UDIS archives into this project, extracting them, aligning each
+pair, and using the feather-blended coarse panorama as a pseudo target:
+
+```bash
+python main.py prepare-udis \
+  --source /root/lys2/udis_l/Data \
+  --raw-output dataset/raw/UDIS-D \
+  --output dataset/prepared/udis \
+  --width 1024 \
+  --height 512
+```
+
+The command expects `unrar` to be installed. It writes:
+
+```text
+dataset/raw/UDIS-D/          copied training/testing .rar files and extracted UDIS-D
+dataset/prepared/udis/       ISS left/right/mask/target folders plus manifest.jsonl
+```
+
+For a quick pipeline check, limit conversion:
+
+```bash
+python main.py prepare-udis --max-samples 8 --width 256 --height 128
+```
+
+The resulting target is marked as `coarse_pseudo_gt` in the manifest. This is
+useful for adapting SD2 to stitched-image appearance and seam cleanup, but it
+does not provide stronger supervision than the geometry baseline itself.
+
 ## 3. Train the tiny backend
 
 ```bash
@@ -308,7 +347,7 @@ python main.py train --config configs/sd2.yaml --data dataset/prepared/panoramas
 
 The default configuration uses:
 
-- `sd2-community/stable-diffusion-2` (the SD2 768-v model)
+- `/root/ApDepth/pretrained_checkpoint/stable-diffusion-2` (the local SD2 768-v model)
 - 512 x 1024 training images
 - scheduler-native `v_prediction`
 - batch size 1 with four-step gradient accumulation
@@ -322,6 +361,15 @@ SD2 is pretrained at 768 x 768. ISS uses 512 x 1024 by default to retain the pan
 The VAE and empty OpenCLIP conditioning are reused from Stable Diffusion 2. The VAE is frozen and only the U-Net is optimized. The original four noisy-latent input weights are preserved, while the left/right/mask condition channels are zero-initialized. Training uses the scheduler bundled with the base checkpoint, and inference constructs a matching deterministic DDIM scheduler from it.
 
 SDXL is not currently supported because it requires additional text and size conditioning.
+
+To fine-tune on the converted UDIS-D data:
+
+```bash
+python main.py train --config configs/sd2-udis.yaml
+```
+
+This keeps the SD2 checkpoint in ApDepth and saves only ISS training outputs
+under `outputs/sd2-udis`.
 
 ## 6. Resume training
 
@@ -416,13 +464,14 @@ Three ready-to-use configurations are included:
 | `configs/tiny.yaml` | Fast end-to-end pipeline and dataset debugging | CPU or GPU |
 | `configs/sd-tiny.yaml` | Real Diffusers/VAE/CLIP/UNet integration smoke test | CPU or GPU |
 | `configs/sd2.yaml` | Full Stable Diffusion 2 fine-tuning | CUDA GPU |
+| `configs/sd2-udis.yaml` | Full SD2 fine-tuning on converted UDIS-D pseudo targets | CUDA GPU |
 
 Important fields:
 
 ```yaml
 model:
   backend: stable-diffusion
-  pretrained_model: sd2-community/stable-diffusion-2
+  pretrained_model: /root/ApDepth/pretrained_checkpoint/stable-diffusion-2
   use_masks: true
   gradient_checkpointing: true
   enable_xformers: false

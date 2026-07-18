@@ -1,0 +1,43 @@
+# Lower-memory SD2 fine-tuning on converted UDIS-D pseudo targets.
+# Use this first when 512x1024 with pixel-space losses runs out of memory.
+model:
+  backend: stable-diffusion
+  pretrained_model: /root/ApDepth/pretrained_checkpoint/stable-diffusion-2
+  use_masks: true
+  gradient_checkpointing: true
+  enable_xformers: false
+  channels_last: true
+
+data:
+  root: dataset/prepared/udis
+  image_height: 256
+  image_width: 512
+  num_workers: 4
+
+loss:
+  diffusion: 1.0
+  reconstruction: 0.0
+  seam: 0.0
+  gradient: 0.0
+  preserve: 0.0
+
+train:
+  output_dir: outputs/sd2-udis-lowmem
+  batch_size: 1
+  max_steps: 20000
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_accumulation: 4
+  grad_clip: 1.0
+  checkpoint_every: 1000
+  validation_every: 0
+  validation_batches: 1
+  log_every: 10
+  seed: 42
+  device: cuda
+  mixed_precision: fp16
+
+diffusion:
+  inference_steps: 30
+  strength: 0.35
+  prediction_type: v_prediction

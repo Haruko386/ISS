@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
@@ -11,7 +13,7 @@ import torch
 from PIL import Image, ImageEnhance
 from torch.utils.data import Dataset
 
-from .alignment import make_seam_mask
+from .alignment import AlignmentError, load_and_align, make_seam_mask
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -141,6 +143,155 @@ def prepare_synthetic_dataset(
     with manifest.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return manifest
+
+
+def _copy_udis_archives(source_dir: Path, raw_dir: Path) -> list[Path]:
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for archive in sorted(source_dir.glob("*.rar")):
+        destination = raw_dir / archive.name
+        if not destination.exists() or destination.stat().st_size != archive.stat().st_size:
+            shutil.copy2(archive, destination)
+        copied.append(destination)
+    return copied
+
+
+def _extract_udis_archives(raw_dir: Path) -> None:
+    if shutil.which("unrar") is None:
+        raise RuntimeError("`unrar` is required to extract UDIS .rar archives.")
+    for archive in sorted(raw_dir.glob("*.rar")):
+        subprocess.run(
+            ["unrar", "x", "-o+", str(archive), str(raw_dir)],
+            check=True,
+        )
+
+
+def _udis_pairs(root: Path, split: str) -> list[tuple[Path, Path]]:
+    split_dir = root / split
+    left_dir = split_dir / "input1"
+    right_dir = split_dir / "input2"
+    if not left_dir.is_dir() or not right_dir.is_dir():
+        return []
+    left_images = {path.name: path for path in discover_images(left_dir)}
+    right_images = {path.name: path for path in discover_images(right_dir)}
+    names = sorted(set(left_images) & set(right_images))
+    return [(left_images[name], right_images[name]) for name in names]
+
+
+def prepare_udis_dataset(
+    source_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    raw_dir: str | Path | None = None,
+    copy_archives: bool = True,
+    extract_archives: bool = True,
+    width: int = 1024,
+    height: int = 512,
+    validation_fraction: float = 0.1,
+    max_samples: int | None = None,
+    seed: int = 42,
+    min_matches: int = 8,
+) -> Path:
+    """Convert UDIS-D image pairs into ISS aligned pseudo-supervised triplets.
+
+    UDIS-D provides only left/right pairs. This converter runs ISS geometry
+    alignment for each pair and uses the feather-blended coarse panorama as a
+    pseudo target so the diffusion UNet can be fine-tuned as a seam/refinement
+    model.
+    """
+    if width % 8 or height % 8:
+        raise ValueError("Dataset width and height must both be divisible by 8.")
+    if not 0.0 <= validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be in [0, 1).")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be positive when provided.")
+
+    source = Path(source_dir)
+    if not source.exists():
+        raise FileNotFoundError(f"UDIS source not found: {source}")
+    raw_root = Path(raw_dir) if raw_dir is not None else source
+    if copy_archives:
+        if not source.is_dir():
+            raise ValueError("copy_archives requires a source directory containing .rar files.")
+        _copy_udis_archives(source, raw_root)
+    if extract_archives:
+        _extract_udis_archives(raw_root)
+
+    output = Path(output_dir)
+    for folder in ("left", "right", "target", "left_mask", "right_mask", "seam_mask"):
+        (output / folder).mkdir(parents=True, exist_ok=True)
+
+    pairs = _udis_pairs(raw_root, "training") + _udis_pairs(raw_root, "testing")
+    if not pairs:
+        raise FileNotFoundError(
+            f"No UDIS input1/input2 pairs found under {raw_root}. "
+            "Expected training/input1, training/input2 and/or testing/input1, testing/input2."
+        )
+    rng = random.Random(seed)
+    rng.shuffle(pairs)
+    if max_samples is not None:
+        pairs = pairs[:max_samples]
+    val_count = int(round(len(pairs) * validation_fraction)) if len(pairs) > 1 else 0
+    val_indices = set(rng.sample(range(len(pairs)), k=min(val_count, len(pairs) - 1))) if val_count else set()
+
+    records: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for index, (left_path, right_path) in enumerate(pairs):
+        try:
+            aligned = load_and_align(
+                left_path,
+                right_path,
+                min_matches=min_matches,
+            )
+        except (AlignmentError, OSError, ValueError) as exc:
+            skipped.append({"left": str(left_path), "right": str(right_path), "error": str(exc)})
+            continue
+
+        name = f"{len(records):06d}.png"
+        cv2.imwrite(str(output / "left" / name), cv2.resize(aligned.left, (width, height), interpolation=cv2.INTER_AREA))
+        cv2.imwrite(str(output / "right" / name), cv2.resize(aligned.right, (width, height), interpolation=cv2.INTER_AREA))
+        cv2.imwrite(str(output / "target" / name), cv2.resize(aligned.coarse, (width, height), interpolation=cv2.INTER_AREA))
+        cv2.imwrite(str(output / "left_mask" / name), cv2.resize(aligned.left_mask, (width, height), interpolation=cv2.INTER_NEAREST))
+        cv2.imwrite(str(output / "right_mask" / name), cv2.resize(aligned.right_mask, (width, height), interpolation=cv2.INTER_NEAREST))
+        cv2.imwrite(str(output / "seam_mask" / name), cv2.resize(aligned.seam_mask, (width, height), interpolation=cv2.INTER_NEAREST))
+        records.append(
+            {
+                "left": f"left/{name}",
+                "right": f"right/{name}",
+                "target": f"target/{name}",
+                "left_mask": f"left_mask/{name}",
+                "right_mask": f"right_mask/{name}",
+                "seam_mask": f"seam_mask/{name}",
+                "split": "val" if index in val_indices else "train",
+                "source_left": str(left_path),
+                "source_right": str(right_path),
+                "target_type": "coarse_pseudo_gt",
+            }
+        )
+    if not records:
+        raise RuntimeError(f"All {len(pairs)} UDIS pairs failed geometric alignment.")
+
+    manifest = write_manifest(records, output / "manifest.jsonl")
+    summary = {
+        "source_dir": str(source),
+        "raw_dir": str(raw_root),
+        "output_dir": str(output),
+        "width": width,
+        "height": height,
+        "records": len(records),
+        "skipped": len(skipped),
+        "target_type": "coarse_pseudo_gt",
+    }
+    (output / "prepare_udis_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if skipped:
+        (output / "prepare_udis_skipped.jsonl").write_text(
+            "\n".join(json.dumps(item, ensure_ascii=False) for item in skipped) + "\n",
+            encoding="utf-8",
+        )
     return manifest
 
 

@@ -1,4 +1,4 @@
-# Full ISS fine-tuning configuration based on Stable Diffusion 2 (768-v).
+# Stable Diffusion 2 fine-tuning on UDIS-D converted with `prepare-udis`.
 model:
   backend: stable-diffusion
   pretrained_model: /root/ApDepth/pretrained_checkpoint/stable-diffusion-2
@@ -8,12 +8,10 @@ model:
   channels_last: true
 
 data:
-  root: dataset/prepared/panoramas
-  # The SD2 UNet is fully convolutional. This panorama-shaped resolution has
-  # a similar pixel budget to its native 768x768 training resolution.
+  root: dataset/prepared/udis
   image_height: 512
   image_width: 1024
-  num_workers: 4
+  num_workers: 1
 
 loss:
   diffusion: 1.0
@@ -23,7 +21,7 @@ loss:
   preserve: 0.25
 
 train:
-  output_dir: outputs/sd2
+  output_dir: outputs/sd2-udis
   batch_size: 1
   max_steps: 20000
   learning_rate: 0.00001
@@ -39,8 +37,6 @@ train:
   mixed_precision: fp16
 
 diffusion:
-  inference_steps: 30
+  inference_steps: 50
   strength: 0.35
-  # Stable Diffusion 2's 768-v checkpoint is trained with velocity prediction.
-  # The beta schedule and training timestep count are loaded from the checkpoint.
   prediction_type: v_prediction

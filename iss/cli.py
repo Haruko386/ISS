@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from .alignment import AlignmentError, load_and_align, save_alignment
 from .config import ProjectConfig, load_config, save_config
-from .data import StitchTripletDataset, prepare_synthetic_dataset
+from .data import StitchTripletDataset, prepare_synthetic_dataset, prepare_udis_dataset
 from .metrics import evaluate_model
 from .model import ISSModel
 from .trainer import ISSTrainer, resolve_device, tensor_to_image
@@ -80,6 +80,25 @@ def command_prepare(args: argparse.Namespace) -> int:
     )
     count = sum(1 for line in manifest.read_text(encoding="utf-8").splitlines() if line)
     print(f"dataset ready: {manifest} ({count} samples)")
+    return 0
+
+
+def command_prepare_udis(args: argparse.Namespace) -> int:
+    manifest = prepare_udis_dataset(
+        args.source,
+        args.output,
+        raw_dir=args.raw_output,
+        copy_archives=args.copy_archives,
+        extract_archives=args.extract_archives,
+        width=args.width,
+        height=args.height,
+        validation_fraction=args.validation_fraction,
+        max_samples=args.max_samples,
+        seed=args.seed,
+        min_matches=args.min_matches,
+    )
+    count = sum(1 for line in manifest.read_text(encoding="utf-8").splitlines() if line)
+    print(f"UDIS dataset ready: {manifest} ({count} aligned samples)")
     return 0
 
 
@@ -395,6 +414,33 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--residual-shift", type=int, default=2)
     prepare.add_argument("--seed", type=int, default=42)
     prepare.set_defaults(func=command_prepare)
+
+    prepare_udis = subparsers.add_parser(
+        "prepare-udis",
+        help="copy/extract UDIS-D and convert pairs into ISS triplets",
+    )
+    prepare_udis.add_argument("--source", default="/root/lys2/udis_l/Data")
+    prepare_udis.add_argument("--raw-output", default="dataset/raw/UDIS-D")
+    prepare_udis.add_argument("--output", default="dataset/prepared/udis")
+    prepare_udis.add_argument("--width", type=int, default=1024)
+    prepare_udis.add_argument("--height", type=int, default=512)
+    prepare_udis.add_argument("--validation-fraction", type=float, default=0.1)
+    prepare_udis.add_argument("--max-samples", type=int)
+    prepare_udis.add_argument("--min-matches", type=int, default=8)
+    prepare_udis.add_argument("--seed", type=int, default=42)
+    prepare_udis.add_argument(
+        "--copy-archives",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="copy UDIS .rar files from --source to --raw-output before preparing",
+    )
+    prepare_udis.add_argument(
+        "--extract-archives",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="extract .rar files found in --raw-output before preparing",
+    )
+    prepare_udis.set_defaults(func=command_prepare_udis)
 
     train = subparsers.add_parser("train", help="fine-tune a 12/14-channel diffusion UNet")
     train.add_argument("--config")
