@@ -10,11 +10,30 @@ import torch.nn.functional as F
 from torch import nn
 
 from .config import DiffusionConfig, LossConfig, ModelConfig
-from .diffusion import LinearNoiseScheduler
+from .diffusion import (
+    LinearNoiseScheduler,
+    diffusion_training_target,
+    predict_clean_sample,
+    scheduler_prediction_type,
+    scheduler_train_timesteps,
+)
 
 
 def expand_unet_conv_in(unet: nn.Module, in_channels: int) -> nn.Conv2d:
-    """Expand a pretrained diffusion input layer, preserving only its noisy-latent path."""
+    """
+    Expand a UNet input convolution to accept the specified number of channels while preserving the first four latent-channel weights.
+    
+    Parameters:
+        unet (nn.Module): UNet containing the input convolution.
+        in_channels (int): Requested number of input channels; must be at least four.
+    
+    Returns:
+        nn.Conv2d: The replacement input convolution.
+    
+    Raises:
+        TypeError: If the UNet input layer is not a 2D convolution.
+        ValueError: If the existing or requested input channel count is less than four.
+    """
     old = unet.conv_in
     if not isinstance(old, nn.Conv2d):
         raise TypeError("unet.conv_in must be torch.nn.Conv2d")
@@ -208,18 +227,34 @@ class ISSModel(nn.Module):
         model_config: ModelConfig | None = None,
         diffusion_config: DiffusionConfig | None = None,
     ) -> None:
+        """
+        Initialize the conditional latent diffusion model for the configured backend.
+        
+        Parameters:
+            model_config (ModelConfig | None): Model architecture and backend settings.
+            diffusion_config (DiffusionConfig | None): Diffusion scheduler and sampling settings.
+        
+        Raises:
+            RuntimeError: If the Stable Diffusion backend dependencies are unavailable or its text encoder and UNet dimensions are incompatible.
+            ValueError: If the configured model backend is unsupported.
+        """
         super().__init__()
         self.model_config = model_config or ModelConfig()
         self.diffusion_config = diffusion_config or DiffusionConfig()
-        self.scheduler = LinearNoiseScheduler(
-            num_train_timesteps=self.diffusion_config.train_timesteps,
-            beta_start=self.diffusion_config.beta_start,
-            beta_end=self.diffusion_config.beta_end,
-            beta_schedule=self.diffusion_config.beta_schedule,
-        )
         self.backend = self.model_config.backend.lower()
         self.cross_attention_dim: int | None = None
         if self.backend == "tiny":
+            prediction_type = self.diffusion_config.prediction_type
+            if prediction_type == "auto":
+                prediction_type = "epsilon"
+            self.scheduler = LinearNoiseScheduler(
+                num_train_timesteps=self.diffusion_config.train_timesteps,
+                beta_start=self.diffusion_config.beta_start,
+                beta_end=self.diffusion_config.beta_end,
+                beta_schedule=self.diffusion_config.beta_schedule,
+                prediction_type=prediction_type,
+            )
+            self.inference_scheduler = self.scheduler
             self.vae = AnalyticAutoencoder(self.model_config.latent_downsample)
             self.unet = TinyConditionUNet(
                 in_channels=self.model_config.in_channels,
@@ -228,13 +263,26 @@ class ISSModel(nn.Module):
             self.latent_scale = 1.0
         elif self.backend in {"stable-diffusion", "sd"}:
             try:
-                from diffusers import AutoencoderKL, UNet2DConditionModel
+                from diffusers import (
+                    AutoencoderKL,
+                    DDIMScheduler,
+                    DDPMScheduler,
+                    UNet2DConditionModel,
+                )
                 from transformers import CLIPTextModel, CLIPTokenizer
             except ImportError as exc:
                 raise RuntimeError(
                     "Stable Diffusion backend requires `pip install -r requirements-sd.txt`."
                 ) from exc
             source = self.model_config.pretrained_model
+            self.scheduler = DDPMScheduler.from_pretrained(source, subfolder="scheduler")
+            if self.diffusion_config.prediction_type != "auto":
+                self.scheduler.register_to_config(
+                    prediction_type=self.diffusion_config.prediction_type
+                )
+            # Training and sampling now share the scheduler configuration from
+            # the SD checkpoint. This is required for SD2's v-prediction model.
+            self.inference_scheduler = DDIMScheduler.from_config(self.scheduler.config)
             self.vae = AutoencoderKL.from_pretrained(source, subfolder="vae")
             self.unet = UNet2DConditionModel.from_pretrained(source, subfolder="unet")
             expand_unet_conv_in(self.unet, self.model_config.in_channels)
@@ -270,8 +318,18 @@ class ISSModel(nn.Module):
             self.vae.eval()
         else:
             raise ValueError(f"Unknown model backend: {self.model_config.backend!r}")
+        self.prediction_type = scheduler_prediction_type(self.scheduler)
 
     def train(self, mode: bool = True) -> "ISSModel":
+        """
+        Set the model's training mode while keeping the stable diffusion VAE in evaluation mode.
+        
+        Parameters:
+        	mode (bool): Whether to enable training mode.
+        
+        Returns:
+        	ISSModel: This model instance.
+        """
         super().train(mode)
         if self.backend != "tiny":
             self.vae.eval()
@@ -285,6 +343,16 @@ class ISSModel(nn.Module):
         return latent * self.latent_scale
 
     def decode(self, latent: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+        """
+        Decode latent representations into image tensors at the requested spatial resolution.
+        
+        Parameters:
+        	latent (torch.Tensor): Latent representation to decode.
+        	output_size (tuple[int, int]): Desired output height and width.
+        
+        Returns:
+        	torch.Tensor: Decoded image tensor with the requested spatial dimensions.
+        """
         if self.backend == "tiny":
             return self.vae.decode(latent, output_size)
         decoded = self.vae.decode(latent / self.latent_scale).sample
@@ -292,7 +360,19 @@ class ISSModel(nn.Module):
             decoded = F.interpolate(decoded, size=output_size, mode="bilinear", align_corners=False)
         return decoded
 
-    def _predict_noise(self, model_input: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+    def _predict_model_output(
+        self, model_input: torch.Tensor, timesteps: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Predict the diffusion model output for the provided inputs and timesteps.
+        
+        Parameters:
+            model_input (torch.Tensor): Model input tensor.
+            timesteps (torch.Tensor): Diffusion timesteps for each input.
+        
+        Returns:
+            torch.Tensor: Predicted diffusion model output.
+        """
         if self.backend == "tiny":
             return self.unet(model_input, timesteps)
         hidden = self.empty_text_embedding.to(
@@ -329,6 +409,20 @@ class ISSModel(nn.Module):
         batch: dict[str, torch.Tensor],
         weights: LossConfig | None = None,
     ) -> dict[str, torch.Tensor]:
+        """
+        Compute the weighted diffusion and image reconstruction losses for a training batch.
+        
+        Parameters:
+            batch (dict[str, torch.Tensor]): Batch containing the left and right images,
+                target image, corresponding masks, and seam mask.
+            weights (LossConfig | None): Optional coefficients for the individual loss
+                components. Defaults to the standard loss configuration.
+        
+        Returns:
+            dict[str, torch.Tensor]: Dictionary containing the weighted total loss and
+                detached diffusion, reconstruction, seam, gradient, and preservation
+                loss components.
+        """
         weights = weights or LossConfig()
         left, right, target = batch["left"], batch["right"], batch["target"]
         left_mask, right_mask = batch["left_mask"], batch["right_mask"]
@@ -340,7 +434,7 @@ class ISSModel(nn.Module):
         noise = torch.randn_like(target_latent)
         timesteps = torch.randint(
             0,
-            self.scheduler.num_train_timesteps,
+            scheduler_train_timesteps(self.scheduler),
             (target.shape[0],),
             device=target.device,
         )
@@ -348,10 +442,17 @@ class ISSModel(nn.Module):
         model_input = self._model_input(
             noisy_target, left_latent, right_latent, left_mask, right_mask
         )
-        noise_prediction = self._predict_noise(model_input, timesteps)
-        loss_diffusion = F.mse_loss(noise_prediction.float(), noise.float())
+        model_prediction = self._predict_model_output(model_input, timesteps)
+        diffusion_target = diffusion_training_target(
+            self.scheduler, target_latent, noise, timesteps
+        )
+        loss_diffusion = F.mse_loss(
+            model_prediction.float(), diffusion_target.float()
+        )
 
-        predicted_x0 = self.scheduler.predict_x0(noisy_target, noise_prediction, timesteps)
+        predicted_x0 = predict_clean_sample(
+            self.scheduler, noisy_target, model_prediction, timesteps
+        )
         predicted_image = self.decode(predicted_x0.clamp(-4.0, 4.0), target.shape[-2:]).clamp(-1.0, 1.0)
         union = ((left_mask + right_mask) > 0).to(target.dtype)
         left_only = left_mask * (1.0 - right_mask)
@@ -391,6 +492,25 @@ class ISSModel(nn.Module):
         num_inference_steps: int | None = None,
         seed: int = 42,
     ) -> torch.Tensor:
+        """
+        Generate a stitched image from left and right reference images and masks.
+        
+        Parameters:
+            left (torch.Tensor): The left reference image.
+            right (torch.Tensor): The right reference image.
+            left_mask (torch.Tensor): The mask identifying valid regions in the left image.
+            right_mask (torch.Tensor): The mask identifying valid regions in the right image.
+            initial_image (torch.Tensor | None): Optional image used as the starting point for partial denoising.
+            strength (float): Denoising strength from 0.0 to 1.0.
+            num_inference_steps (int | None): Number of denoising steps, or the configured default when omitted.
+            seed (int): Seed used to generate sampling noise.
+        
+        Returns:
+            torch.Tensor: The generated image, clamped to the range [-1, 1].
+        
+        Raises:
+            ValueError: If `strength` is outside the range [0.0, 1.0].
+        """
         if not 0.0 <= strength <= 1.0:
             raise ValueError("strength must be between 0 and 1.")
         left_latent = self.encode(left)
@@ -404,32 +524,63 @@ class ISSModel(nn.Module):
             device=left.device,
             dtype=left_latent.dtype,
         )
-        steps = self.scheduler.inference_timesteps(
-            num_inference_steps or self.diffusion_config.inference_steps,
-            left.device,
-        )
+        inference_steps = num_inference_steps or self.diffusion_config.inference_steps
+        if self.backend == "tiny":
+            steps = self.scheduler.inference_timesteps(inference_steps, left.device)
+        else:
+            self.inference_scheduler.set_timesteps(inference_steps, device=left.device)
+            steps = self.inference_scheduler.timesteps
         if initial_image is None or strength >= 1.0:
-            sample = noise
+            noise_scale = float(
+                getattr(self.inference_scheduler, "init_noise_sigma", 1.0)
+            )
+            sample = noise * noise_scale
         else:
             initial_latent = self.encode(initial_image)
             denoise_count = max(1, int(math.ceil(len(steps) * strength)))
             steps = steps[-denoise_count:]
             start = steps[0].expand(left.shape[0])
-            sample = self.scheduler.add_noise(initial_latent, noise, start)
+            sample = self.inference_scheduler.add_noise(initial_latent, noise, start)
         for index, timestep in enumerate(steps):
             batch_timestep = timestep.expand(left.shape[0])
-            model_input = self._model_input(
-                sample, left_latent, right_latent, left_mask, right_mask
+            denoising_target = (
+                self.inference_scheduler.scale_model_input(sample, timestep)
+                if self.backend != "tiny"
+                else sample
             )
-            noise_prediction = self._predict_noise(model_input, batch_timestep)
-            previous = steps[index + 1] if index + 1 < len(steps) else -1
-            sample = self.scheduler.ddim_step(noise_prediction, timestep, previous, sample)
+            model_input = self._model_input(
+                denoising_target, left_latent, right_latent, left_mask, right_mask
+            )
+            model_prediction = self._predict_model_output(model_input, batch_timestep)
+            if self.backend == "tiny":
+                previous = steps[index + 1] if index + 1 < len(steps) else -1
+                sample = self.scheduler.ddim_step(
+                    model_prediction, timestep, previous, sample
+                )
+            else:
+                sample = self.inference_scheduler.step(
+                    model_prediction,
+                    timestep,
+                    sample,
+                    eta=0.0,
+                    return_dict=False,
+                )[0]
         return self.decode(sample, left.shape[-2:]).clamp(-1.0, 1.0)
 
     def trainable_parameters(self) -> Any:
+        """Return the trainable parameters of the model's UNet."""
         return self.unet.parameters()
 
     def save_model(self, output_dir: str | Path) -> Path:
+        """
+        Save the model weights and configuration metadata to an output directory.
+        
+        Parameters:
+        	output_dir (str | Path): Directory where the model files will be stored.
+        
+        Returns:
+        	Path: Path to the saved model weights or model directory.
+        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         metadata = {
@@ -441,6 +592,9 @@ class ISSModel(nn.Module):
                 else ["noisy_target:4", "left:4", "right:4"]
             ),
             "pretrained_model": self.model_config.pretrained_model,
+            "prediction_type": self.prediction_type,
+            "cross_attention_dim": self.cross_attention_dim,
+            "latent_scale": self.latent_scale,
         }
         (output_dir / "model_metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"

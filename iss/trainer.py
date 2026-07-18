@@ -230,6 +230,15 @@ class ISSTrainer:
         return metrics
 
     def train(self) -> Path:
+        """
+        Train the model to the configured maximum step and save the final checkpoint.
+        
+        Returns:
+            Path: Path to the final checkpoint directory.
+        
+        Raises:
+            ValueError: If the checkpoint has already reached or exceeded the configured maximum step.
+        """
         config = self.config.train
         if self.start_step >= config.max_steps:
             raise ValueError(
@@ -298,6 +307,8 @@ class ISSTrainer:
             "resumed_from": self.resumed_from,
             "device": str(self.device),
             "backend": self.model.backend,
+            "pretrained_model": self.config.model.pretrained_model,
+            "prediction_type": self.model.prediction_type,
             "in_channels": self.config.model.in_channels,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "final_metrics": last_metrics,

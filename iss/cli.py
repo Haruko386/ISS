@@ -188,6 +188,25 @@ def run_inference(
     device_name: str = "auto",
     preserve_known: bool = True,
 ) -> Path:
+    """
+    Generate a stitched image from two input images using a trained checkpoint.
+    
+    Parameters:
+        config (ProjectConfig): Model, diffusion, and output image configuration.
+        checkpoint (Path): Path to the trained model checkpoint.
+        left_path (str): Path to the left input image.
+        right_path (str): Path to the right input image.
+        output_path (str | Path): Path for the stitched image and associated metadata.
+        aligned_dir (str | None): Optional directory containing precomputed alignment data.
+        steps (int | None): Optional number of diffusion inference steps.
+        strength (float | None): Optional diffusion sampling strength.
+        seed (int): Random seed used for sampling.
+        device_name (str): Device selection specification.
+        preserve_known (bool): Whether to blend known regions from the coarse alignment into the result.
+    
+    Returns:
+        Path: Path to the saved stitched image.
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     geometry_dir = output_path.parent / f"{output_path.stem}_alignment"
@@ -247,6 +266,8 @@ def run_inference(
     metadata = {
         "checkpoint": str(checkpoint),
         "backend": config.model.backend,
+        "pretrained_model": config.model.pretrained_model,
+        "prediction_type": model.prediction_type,
         "in_channels": config.model.in_channels,
         "inference_steps": steps or config.diffusion.inference_steps,
         "strength": config.diffusion.strength if strength is None else strength,

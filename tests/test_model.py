@@ -5,7 +5,11 @@ import torch
 from torch import nn
 
 from iss.config import DiffusionConfig, LossConfig, ModelConfig
-from iss.diffusion import LinearNoiseScheduler
+from iss.diffusion import (
+    LinearNoiseScheduler,
+    diffusion_training_target,
+    predict_clean_sample,
+)
 from iss.model import (
     ISSModel,
     configure_unet_memory,
@@ -15,9 +19,14 @@ from iss.model import (
 
 class DummyUNet(nn.Module):
     def __init__(self):
+        """Initialize a minimal UNet-like module with a four-channel input convolution."""
         super().__init__()
         self.conv_in = nn.Conv2d(4, 8, 3, padding=1)
         self.config = {"in_channels": 4}
+
+
+def test_default_full_backend_uses_stable_diffusion_2():
+    assert ModelConfig().pretrained_model == "sd2-community/stable-diffusion-2"
 
 
 def test_expand_conv_preserves_noisy_channels_and_zeros_conditions():
@@ -94,6 +103,22 @@ def test_scaled_linear_scheduler_endpoints():
     torch.testing.assert_close(scheduler.betas[0], torch.tensor(0.00085))
     torch.testing.assert_close(scheduler.betas[-1], torch.tensor(0.012))
     assert torch.all(scheduler.betas[1:] > scheduler.betas[:-1])
+
+
+def test_velocity_prediction_target_recovers_clean_sample():
+    scheduler = LinearNoiseScheduler(
+        num_train_timesteps=10,
+        prediction_type="v_prediction",
+    )
+    clean = torch.randn(2, 4, 4, 4)
+    noise = torch.randn_like(clean)
+    timesteps = torch.tensor([2, 7])
+    noisy = scheduler.add_noise(clean, noise, timesteps)
+    velocity = diffusion_training_target(scheduler, clean, noise, timesteps)
+
+    recovered = predict_clean_sample(scheduler, noisy, velocity, timesteps)
+
+    torch.testing.assert_close(recovered, clean)
 
 
 def test_memory_options_are_applied():
@@ -184,10 +209,127 @@ def test_stable_diffusion_component_wiring_without_weights(monkeypatch):
         def forward(self, input_ids):
             return (torch.zeros(input_ids.shape[0], input_ids.shape[1], 6),)
 
+    class FakeSchedulerConfig(SimpleNamespace):
+        def __iter__(self):
+            """Iterate over the instance attribute names."""
+            return iter(vars(self))
+
+    class FakeDDPMScheduler:
+        def __init__(self):
+            """Initialize the scheduler configuration and cumulative alpha values."""
+            self.config = FakeSchedulerConfig(
+                num_train_timesteps=10,
+                prediction_type="v_prediction",
+            )
+            self.alphas_cumprod = torch.linspace(0.99, 0.1, 10)
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def register_to_config(self, **values):
+            """Update the configuration with the provided key-value pairs.
+            
+            Parameters:
+            	values (dict): Configuration attributes and their values.
+            """
+            for key, value in values.items():
+                setattr(self.config, key, value)
+
+        def add_noise(self, clean, noise, timesteps):
+            """
+            Add timestep-dependent noise to clean samples.
+            
+            Parameters:
+                clean: The original samples.
+                noise: The noise to add.
+                timesteps: The diffusion timesteps used to determine the noise level.
+            
+            Returns:
+                The noisy samples.
+            """
+            alpha = self.alphas_cumprod[timesteps].reshape(-1, 1, 1, 1)
+            return alpha.sqrt() * clean + (1.0 - alpha).sqrt() * noise
+
+        def get_velocity(self, clean, noise, timesteps):
+            """
+            Compute the velocity target for clean samples, noise, and diffusion timesteps.
+            
+            Parameters:
+                clean (Tensor): Clean sample tensor.
+                noise (Tensor): Noise tensor matching the shape of `clean`.
+                timesteps (Tensor): Diffusion timestep indices.
+            
+            Returns:
+                Tensor: Velocity target for each sample.
+            """
+            alpha = self.alphas_cumprod[timesteps].reshape(-1, 1, 1, 1)
+            return alpha.sqrt() * noise - (1.0 - alpha).sqrt() * clean
+
+    class FakeDDIMScheduler:
+        init_noise_sigma = 1.0
+
+        @classmethod
+        def from_config(cls, config):
+            """
+            Create a scheduler instance from the provided configuration.
+            
+            Parameters:
+                config: Scheduler configuration to assign to the new instance.
+            
+            Returns:
+                A scheduler instance with the provided configuration and cumulative alpha values.
+            """
+            instance = cls()
+            instance.config = config
+            instance.alphas_cumprod = torch.linspace(0.99, 0.1, 10)
+            return instance
+
+        def set_timesteps(self, num_inference_steps, device=None):
+            """Set the inference timesteps in descending order.
+            
+            Parameters:
+            	num_inference_steps (int): Number of timesteps to generate.
+            	device: Device on which to create the timesteps tensor.
+            """
+            self.timesteps = torch.linspace(
+                9, 0, num_inference_steps, device=device
+            ).round().long()
+
+        def scale_model_input(self, sample, _timestep):
+            """Return the model input unchanged."""
+            return sample
+
+        def add_noise(self, clean, noise, timesteps):
+            """
+            Add noise to clean samples at the specified diffusion timesteps.
+            
+            Parameters:
+                clean: The clean samples.
+                noise: The noise to apply.
+                timesteps: The diffusion timestep for each sample.
+            
+            Returns:
+                The noised samples.
+            """
+            alpha = self.alphas_cumprod.to(clean.device)[timesteps].reshape(
+                -1, 1, 1, 1
+            )
+            return alpha.sqrt() * clean + (1.0 - alpha).sqrt() * noise
+
+        def step(self, _model_output, _timestep, sample, **_kwargs):
+            """Return the input sample unchanged."""
+            return (sample,)
+
     monkeypatch.setitem(
         sys.modules,
         "diffusers",
-        SimpleNamespace(AutoencoderKL=FakeVAE, UNet2DConditionModel=FakeUNet),
+        SimpleNamespace(
+            AutoencoderKL=FakeVAE,
+            DDIMScheduler=FakeDDIMScheduler,
+            DDPMScheduler=FakeDDPMScheduler,
+            UNet2DConditionModel=FakeUNet,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -200,8 +342,19 @@ def test_stable_diffusion_component_wiring_without_weights(monkeypatch):
     )
     losses = model.training_losses(_batch())
     losses["loss"].backward()
+    batch = _batch()
+    sample = model.sample(
+        batch["left"],
+        batch["right"],
+        batch["left_mask"],
+        batch["right_mask"],
+        num_inference_steps=2,
+    )
 
     assert model.unet.conv_in.in_channels == 14
     assert model.empty_text_embedding.shape == (1, 5, 6)
+    assert model.prediction_type == "v_prediction"
     assert all(not parameter.requires_grad for parameter in model.vae.parameters())
     assert model.unet.conv_in.weight.grad is not None
+    assert sample.shape == batch["target"].shape
+    assert torch.isfinite(sample).all()

@@ -41,6 +41,7 @@ diffusion:
   train_timesteps: 1000
   inference_steps: 2
   strength: 0.10
+  prediction_type: auto
   beta_schedule: scaled_linear
   beta_start: 0.00085
   beta_end: 0.012
