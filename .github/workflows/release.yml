@@ -155,6 +155,10 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          driver: docker-container
+          driver-opts: |
+            network=host
+            image=moby/buildkit:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
