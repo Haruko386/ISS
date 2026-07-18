@@ -8,7 +8,19 @@ SUPPORTED_PREDICTION_TYPES = {"epsilon", "sample", "v_prediction"}
 
 
 def scheduler_prediction_type(scheduler: object) -> str:
-    """Return a normalized Diffusers-compatible prediction type."""
+    """
+    Normalize and validate a scheduler's diffusion prediction type.
+    
+    The value is read from the scheduler configuration or scheduler attribute,
+    defaulting to ``"epsilon"`` when unspecified. Supported values are
+    ``"epsilon"``, ``"sample"``, and ``"v_prediction"``.
+    
+    Returns:
+        str: The normalized prediction type.
+    
+    Raises:
+        ValueError: If the prediction type is unsupported.
+    """
     config = getattr(scheduler, "config", None)
     prediction_type = getattr(config, "prediction_type", None)
     if prediction_type is None and isinstance(config, dict):
@@ -25,6 +37,18 @@ def scheduler_prediction_type(scheduler: object) -> str:
 
 
 def scheduler_train_timesteps(scheduler: object) -> int:
+    """
+    Get the number of training timesteps configured for a scheduler.
+    
+    Parameters:
+    	scheduler (object): Scheduler whose training timestep count is read.
+    
+    Returns:
+    	int: Configured number of training timesteps.
+    
+    Raises:
+    	AttributeError: If the scheduler does not expose a training timestep count.
+    """
     config = getattr(scheduler, "config", None)
     value = getattr(config, "num_train_timesteps", None)
     if value is None and isinstance(config, dict):
@@ -41,6 +65,16 @@ def _extract_alpha(
     timesteps: torch.Tensor,
     sample: torch.Tensor,
 ) -> torch.Tensor:
+    """Extract per-timestep cumulative alpha values reshaped for broadcasting with a sample.
+    
+    Parameters:
+    	scheduler (object): Scheduler containing the cumulative alpha values.
+    	timesteps (torch.Tensor): Timestep indices used to select alpha values.
+    	sample (torch.Tensor): Tensor whose device, data type, and dimensions determine the output format.
+    
+    Returns:
+    	(torch.Tensor): Selected cumulative alpha values on the sample's device and data type, with singleton dimensions for broadcasting.
+    """
     alphas_cumprod = getattr(scheduler, "alphas_cumprod")
     selected = alphas_cumprod.to(device=sample.device)[timesteps.long()]
     return selected.reshape((-1,) + (1,) * (sample.ndim - 1)).to(sample.dtype)
@@ -52,7 +86,13 @@ def diffusion_training_target(
     noise: torch.Tensor,
     timesteps: torch.Tensor,
 ) -> torch.Tensor:
-    """Build the epsilon/sample/velocity target required by the scheduler."""
+    """
+    Build the training target for the scheduler's prediction parameterization.
+    
+    Returns:
+        A noise, clean-sample, or velocity target according to the scheduler's
+        prediction type.
+    """
     prediction_type = scheduler_prediction_type(scheduler)
     if prediction_type == "epsilon":
         return noise
@@ -71,7 +111,18 @@ def predict_clean_sample(
     model_output: torch.Tensor,
     timesteps: torch.Tensor,
 ) -> torch.Tensor:
-    """Recover x0 from any scheduler-supported model parameterization."""
+    """
+    Recover the clean sample from a noisy sample and model output.
+    
+    Parameters:
+        scheduler (object): Scheduler providing the model prediction parameterization and cumulative alpha values.
+        noisy (torch.Tensor): Noisy sample at the specified timesteps.
+        model_output (torch.Tensor): Model output in the scheduler's configured parameterization.
+        timesteps (torch.Tensor): Timesteps associated with the samples.
+    
+    Returns:
+        torch.Tensor: Reconstructed clean sample.
+    """
     prediction_type = scheduler_prediction_type(scheduler)
     if prediction_type == "sample":
         return model_output
@@ -94,6 +145,21 @@ class LinearNoiseScheduler(nn.Module):
         beta_schedule: str = "linear",
         prediction_type: str = "epsilon",
     ) -> None:
+        """
+        Initialize a lightweight diffusion noise scheduler.
+        
+        Args:
+            num_train_timesteps: Number of training diffusion steps; must be at least 2.
+            beta_start: Initial noise variance.
+            beta_end: Final noise variance.
+            beta_schedule: Beta schedule, either ``"linear"`` or ``"scaled_linear"``.
+            prediction_type: Model output parameterization: ``"epsilon"``, ``"sample"``,
+                or ``"v_prediction"``.
+        
+        Raises:
+            ValueError: If the number of timesteps, beta schedule, or prediction type is
+                invalid.
+        """
         super().__init__()
         if num_train_timesteps < 2:
             raise ValueError("num_train_timesteps must be at least 2.")
@@ -127,20 +193,59 @@ class LinearNoiseScheduler(nn.Module):
     def add_noise(
         self, clean: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor
     ) -> torch.Tensor:
+        """Add noise to clean samples according to the specified diffusion timesteps.
+        
+        Parameters:
+            clean (torch.Tensor): Clean samples.
+            noise (torch.Tensor): Noise to add.
+            timesteps (torch.Tensor): Diffusion timestep for each sample.
+        
+        Returns:
+            torch.Tensor: Noisy samples."""
         alpha = self._extract(self.alphas_cumprod, timesteps, clean)
         return alpha.sqrt() * clean + (1.0 - alpha).sqrt() * noise
 
     def predict_x0(
         self, noisy: torch.Tensor, model_output: torch.Tensor, timesteps: torch.Tensor
     ) -> torch.Tensor:
+        """Recover the clean sample from a noisy sample and the model output.
+        
+        Parameters:
+            noisy (torch.Tensor): The noisy sample.
+            model_output (torch.Tensor): The model output for the configured prediction type.
+            timesteps (torch.Tensor): The diffusion timestep for each sample.
+        
+        Returns:
+            torch.Tensor: The predicted clean sample.
+        """
         return predict_clean_sample(self, noisy, model_output, timesteps)
 
     def training_target(
         self, clean: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor
     ) -> torch.Tensor:
+        """Build the model training target for the configured prediction type.
+        
+        Parameters:
+        	clean (torch.Tensor): Clean samples.
+        	noise (torch.Tensor): Noise added to the clean samples.
+        	timesteps (torch.Tensor): Diffusion timestep for each sample.
+        
+        Returns:
+        	torch.Tensor: Training target corresponding to the scheduler's prediction type.
+        """
         return diffusion_training_target(self, clean, noise, timesteps)
 
     def inference_timesteps(self, num_inference_steps: int, device: torch.device) -> torch.Tensor:
+        """
+        Create descending diffusion timesteps for inference.
+        
+        Parameters:
+        	num_inference_steps (int): Number of inference steps to generate.
+        	device (torch.device): Device on which to create the timestep tensor.
+        
+        Returns:
+        	torch.Tensor: A one-dimensional tensor of unique, descending timestep indices.
+        """
         if num_inference_steps < 1:
             raise ValueError("num_inference_steps must be positive.")
         steps = torch.linspace(
@@ -158,6 +263,18 @@ class LinearNoiseScheduler(nn.Module):
         previous_timestep: int | torch.Tensor,
         sample: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Compute the deterministic DDIM denoising update for one timestep.
+        
+        Parameters:
+        	model_output (torch.Tensor): Model prediction for the current noisy sample.
+        	timestep (int | torch.Tensor): Current diffusion timestep.
+        	previous_timestep (int | torch.Tensor): Timestep used for the updated sample.
+        	sample (torch.Tensor): Current noisy sample.
+        
+        Returns:
+        	torch.Tensor: Sample denoised to the previous timestep.
+        """
         t = int(timestep.item()) if isinstance(timestep, torch.Tensor) else int(timestep)
         previous = (
             int(previous_timestep.item())

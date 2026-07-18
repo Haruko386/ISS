@@ -19,6 +19,7 @@ from iss.model import (
 
 class DummyUNet(nn.Module):
     def __init__(self):
+        """Initialize a minimal UNet-like module with a four-channel input convolution."""
         super().__init__()
         self.conv_in = nn.Conv2d(4, 8, 3, padding=1)
         self.config = {"in_channels": 4}
@@ -210,10 +211,12 @@ def test_stable_diffusion_component_wiring_without_weights(monkeypatch):
 
     class FakeSchedulerConfig(SimpleNamespace):
         def __iter__(self):
+            """Iterate over the instance attribute names."""
             return iter(vars(self))
 
     class FakeDDPMScheduler:
         def __init__(self):
+            """Initialize the scheduler configuration and cumulative alpha values."""
             self.config = FakeSchedulerConfig(
                 num_train_timesteps=10,
                 prediction_type="v_prediction",
@@ -225,14 +228,41 @@ def test_stable_diffusion_component_wiring_without_weights(monkeypatch):
             return cls()
 
         def register_to_config(self, **values):
+            """Update the configuration with the provided key-value pairs.
+            
+            Parameters:
+            	values (dict): Configuration attributes and their values.
+            """
             for key, value in values.items():
                 setattr(self.config, key, value)
 
         def add_noise(self, clean, noise, timesteps):
+            """
+            Add timestep-dependent noise to clean samples.
+            
+            Parameters:
+                clean: The original samples.
+                noise: The noise to add.
+                timesteps: The diffusion timesteps used to determine the noise level.
+            
+            Returns:
+                The noisy samples.
+            """
             alpha = self.alphas_cumprod[timesteps].reshape(-1, 1, 1, 1)
             return alpha.sqrt() * clean + (1.0 - alpha).sqrt() * noise
 
         def get_velocity(self, clean, noise, timesteps):
+            """
+            Compute the velocity target for clean samples, noise, and diffusion timesteps.
+            
+            Parameters:
+                clean (Tensor): Clean sample tensor.
+                noise (Tensor): Noise tensor matching the shape of `clean`.
+                timesteps (Tensor): Diffusion timestep indices.
+            
+            Returns:
+                Tensor: Velocity target for each sample.
+            """
             alpha = self.alphas_cumprod[timesteps].reshape(-1, 1, 1, 1)
             return alpha.sqrt() * noise - (1.0 - alpha).sqrt() * clean
 
@@ -241,26 +271,54 @@ def test_stable_diffusion_component_wiring_without_weights(monkeypatch):
 
         @classmethod
         def from_config(cls, config):
+            """
+            Create a scheduler instance from the provided configuration.
+            
+            Parameters:
+                config: Scheduler configuration to assign to the new instance.
+            
+            Returns:
+                A scheduler instance with the provided configuration and cumulative alpha values.
+            """
             instance = cls()
             instance.config = config
             instance.alphas_cumprod = torch.linspace(0.99, 0.1, 10)
             return instance
 
         def set_timesteps(self, num_inference_steps, device=None):
+            """Set the inference timesteps in descending order.
+            
+            Parameters:
+            	num_inference_steps (int): Number of timesteps to generate.
+            	device: Device on which to create the timesteps tensor.
+            """
             self.timesteps = torch.linspace(
                 9, 0, num_inference_steps, device=device
             ).round().long()
 
         def scale_model_input(self, sample, _timestep):
+            """Return the model input unchanged."""
             return sample
 
         def add_noise(self, clean, noise, timesteps):
+            """
+            Add noise to clean samples at the specified diffusion timesteps.
+            
+            Parameters:
+                clean: The clean samples.
+                noise: The noise to apply.
+                timesteps: The diffusion timestep for each sample.
+            
+            Returns:
+                The noised samples.
+            """
             alpha = self.alphas_cumprod.to(clean.device)[timesteps].reshape(
                 -1, 1, 1, 1
             )
             return alpha.sqrt() * clean + (1.0 - alpha).sqrt() * noise
 
         def step(self, _model_output, _timestep, sample, **_kwargs):
+            """Return the input sample unchanged."""
             return (sample,)
 
     monkeypatch.setitem(
