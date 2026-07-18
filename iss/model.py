@@ -20,7 +20,20 @@ from .diffusion import (
 
 
 def expand_unet_conv_in(unet: nn.Module, in_channels: int) -> nn.Conv2d:
-    """Expand a pretrained diffusion input layer, preserving only its noisy-latent path."""
+    """
+    Expand a UNet input convolution to accept the specified number of channels while preserving the first four latent-channel weights.
+    
+    Parameters:
+        unet (nn.Module): UNet containing the input convolution.
+        in_channels (int): Requested number of input channels; must be at least four.
+    
+    Returns:
+        nn.Conv2d: The replacement input convolution.
+    
+    Raises:
+        TypeError: If the UNet input layer is not a 2D convolution.
+        ValueError: If the existing or requested input channel count is less than four.
+    """
     old = unet.conv_in
     if not isinstance(old, nn.Conv2d):
         raise TypeError("unet.conv_in must be torch.nn.Conv2d")
@@ -214,6 +227,17 @@ class ISSModel(nn.Module):
         model_config: ModelConfig | None = None,
         diffusion_config: DiffusionConfig | None = None,
     ) -> None:
+        """
+        Initialize the conditional latent diffusion model for the configured backend.
+        
+        Parameters:
+            model_config (ModelConfig | None): Model architecture and backend settings.
+            diffusion_config (DiffusionConfig | None): Diffusion scheduler and sampling settings.
+        
+        Raises:
+            RuntimeError: If the Stable Diffusion backend dependencies are unavailable or its text encoder and UNet dimensions are incompatible.
+            ValueError: If the configured model backend is unsupported.
+        """
         super().__init__()
         self.model_config = model_config or ModelConfig()
         self.diffusion_config = diffusion_config or DiffusionConfig()
@@ -297,6 +321,15 @@ class ISSModel(nn.Module):
         self.prediction_type = scheduler_prediction_type(self.scheduler)
 
     def train(self, mode: bool = True) -> "ISSModel":
+        """
+        Set the model's training mode while keeping the stable diffusion VAE in evaluation mode.
+        
+        Parameters:
+        	mode (bool): Whether to enable training mode.
+        
+        Returns:
+        	ISSModel: This model instance.
+        """
         super().train(mode)
         if self.backend != "tiny":
             self.vae.eval()
@@ -310,6 +343,16 @@ class ISSModel(nn.Module):
         return latent * self.latent_scale
 
     def decode(self, latent: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+        """
+        Decode latent representations into image tensors at the requested spatial resolution.
+        
+        Parameters:
+        	latent (torch.Tensor): Latent representation to decode.
+        	output_size (tuple[int, int]): Desired output height and width.
+        
+        Returns:
+        	torch.Tensor: Decoded image tensor with the requested spatial dimensions.
+        """
         if self.backend == "tiny":
             return self.vae.decode(latent, output_size)
         decoded = self.vae.decode(latent / self.latent_scale).sample
@@ -320,6 +363,16 @@ class ISSModel(nn.Module):
     def _predict_model_output(
         self, model_input: torch.Tensor, timesteps: torch.Tensor
     ) -> torch.Tensor:
+        """
+        Predict the diffusion model output for the provided inputs and timesteps.
+        
+        Parameters:
+            model_input (torch.Tensor): Model input tensor.
+            timesteps (torch.Tensor): Diffusion timesteps for each input.
+        
+        Returns:
+            torch.Tensor: Predicted diffusion model output.
+        """
         if self.backend == "tiny":
             return self.unet(model_input, timesteps)
         hidden = self.empty_text_embedding.to(
@@ -356,6 +409,20 @@ class ISSModel(nn.Module):
         batch: dict[str, torch.Tensor],
         weights: LossConfig | None = None,
     ) -> dict[str, torch.Tensor]:
+        """
+        Compute the weighted diffusion and image reconstruction losses for a training batch.
+        
+        Parameters:
+            batch (dict[str, torch.Tensor]): Batch containing the left and right images,
+                target image, corresponding masks, and seam mask.
+            weights (LossConfig | None): Optional coefficients for the individual loss
+                components. Defaults to the standard loss configuration.
+        
+        Returns:
+            dict[str, torch.Tensor]: Dictionary containing the weighted total loss and
+                detached diffusion, reconstruction, seam, gradient, and preservation
+                loss components.
+        """
         weights = weights or LossConfig()
         left, right, target = batch["left"], batch["right"], batch["target"]
         left_mask, right_mask = batch["left_mask"], batch["right_mask"]
@@ -425,6 +492,25 @@ class ISSModel(nn.Module):
         num_inference_steps: int | None = None,
         seed: int = 42,
     ) -> torch.Tensor:
+        """
+        Generate a stitched image from left and right reference images and masks.
+        
+        Parameters:
+            left (torch.Tensor): The left reference image.
+            right (torch.Tensor): The right reference image.
+            left_mask (torch.Tensor): The mask identifying valid regions in the left image.
+            right_mask (torch.Tensor): The mask identifying valid regions in the right image.
+            initial_image (torch.Tensor | None): Optional image used as the starting point for partial denoising.
+            strength (float): Denoising strength from 0.0 to 1.0.
+            num_inference_steps (int | None): Number of denoising steps, or the configured default when omitted.
+            seed (int): Seed used to generate sampling noise.
+        
+        Returns:
+            torch.Tensor: The generated image, clamped to the range [-1, 1].
+        
+        Raises:
+            ValueError: If `strength` is outside the range [0.0, 1.0].
+        """
         if not 0.0 <= strength <= 1.0:
             raise ValueError("strength must be between 0 and 1.")
         left_latent = self.encode(left)
@@ -482,9 +568,19 @@ class ISSModel(nn.Module):
         return self.decode(sample, left.shape[-2:]).clamp(-1.0, 1.0)
 
     def trainable_parameters(self) -> Any:
+        """Return the trainable parameters of the model's UNet."""
         return self.unet.parameters()
 
     def save_model(self, output_dir: str | Path) -> Path:
+        """
+        Save the model weights and configuration metadata to an output directory.
+        
+        Parameters:
+        	output_dir (str | Path): Directory where the model files will be stored.
+        
+        Returns:
+        	Path: Path to the saved model weights or model directory.
+        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         metadata = {
