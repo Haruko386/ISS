@@ -247,6 +247,8 @@ def run_inference(
     metadata = {
         "checkpoint": str(checkpoint),
         "backend": config.model.backend,
+        "pretrained_model": config.model.pretrained_model,
+        "prediction_type": model.prediction_type,
         "in_channels": config.model.in_channels,
         "inference_steps": steps or config.diffusion.inference_steps,
         "strength": config.diffusion.strength if strength is None else strength,

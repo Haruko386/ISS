@@ -1,13 +1,16 @@
+# Full ISS fine-tuning configuration based on Stable Diffusion 2 (768-v).
 model:
   backend: stable-diffusion
-  pretrained_model: stable-diffusion-v1-5/stable-diffusion-v1-5
+  pretrained_model: sd2-community/stable-diffusion-2
   use_masks: true
   gradient_checkpointing: true
   enable_xformers: false
   channels_last: true
 
 data:
-  root: data/panoramas
+  root: dataset/prepared/panoramas
+  # The SD2 UNet is fully convolutional. This panorama-shaped resolution has
+  # a similar pixel budget to its native 768x768 training resolution.
   image_height: 512
   image_width: 1024
   num_workers: 4
@@ -20,7 +23,7 @@ loss:
   preserve: 0.25
 
 train:
-  output_dir: outputs/sd15
+  output_dir: outputs/sd2
   batch_size: 1
   max_steps: 20000
   learning_rate: 0.00001
@@ -36,9 +39,8 @@ train:
   mixed_precision: fp16
 
 diffusion:
-  train_timesteps: 1000
   inference_steps: 30
   strength: 0.35
-  beta_schedule: scaled_linear
-  beta_start: 0.00085
-  beta_end: 0.012
+  # Stable Diffusion 2's 768-v checkpoint is trained with velocity prediction.
+  # The beta schedule and training timestep count are loaded from the checkpoint.
+  prediction_type: v_prediction

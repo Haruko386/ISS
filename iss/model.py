@@ -10,7 +10,13 @@ import torch.nn.functional as F
 from torch import nn
 
 from .config import DiffusionConfig, LossConfig, ModelConfig
-from .diffusion import LinearNoiseScheduler
+from .diffusion import (
+    LinearNoiseScheduler,
+    diffusion_training_target,
+    predict_clean_sample,
+    scheduler_prediction_type,
+    scheduler_train_timesteps,
+)
 
 
 def expand_unet_conv_in(unet: nn.Module, in_channels: int) -> nn.Conv2d:
@@ -211,15 +217,20 @@ class ISSModel(nn.Module):
         super().__init__()
         self.model_config = model_config or ModelConfig()
         self.diffusion_config = diffusion_config or DiffusionConfig()
-        self.scheduler = LinearNoiseScheduler(
-            num_train_timesteps=self.diffusion_config.train_timesteps,
-            beta_start=self.diffusion_config.beta_start,
-            beta_end=self.diffusion_config.beta_end,
-            beta_schedule=self.diffusion_config.beta_schedule,
-        )
         self.backend = self.model_config.backend.lower()
         self.cross_attention_dim: int | None = None
         if self.backend == "tiny":
+            prediction_type = self.diffusion_config.prediction_type
+            if prediction_type == "auto":
+                prediction_type = "epsilon"
+            self.scheduler = LinearNoiseScheduler(
+                num_train_timesteps=self.diffusion_config.train_timesteps,
+                beta_start=self.diffusion_config.beta_start,
+                beta_end=self.diffusion_config.beta_end,
+                beta_schedule=self.diffusion_config.beta_schedule,
+                prediction_type=prediction_type,
+            )
+            self.inference_scheduler = self.scheduler
             self.vae = AnalyticAutoencoder(self.model_config.latent_downsample)
             self.unet = TinyConditionUNet(
                 in_channels=self.model_config.in_channels,
@@ -228,13 +239,26 @@ class ISSModel(nn.Module):
             self.latent_scale = 1.0
         elif self.backend in {"stable-diffusion", "sd"}:
             try:
-                from diffusers import AutoencoderKL, UNet2DConditionModel
+                from diffusers import (
+                    AutoencoderKL,
+                    DDIMScheduler,
+                    DDPMScheduler,
+                    UNet2DConditionModel,
+                )
                 from transformers import CLIPTextModel, CLIPTokenizer
             except ImportError as exc:
                 raise RuntimeError(
                     "Stable Diffusion backend requires `pip install -r requirements-sd.txt`."
                 ) from exc
             source = self.model_config.pretrained_model
+            self.scheduler = DDPMScheduler.from_pretrained(source, subfolder="scheduler")
+            if self.diffusion_config.prediction_type != "auto":
+                self.scheduler.register_to_config(
+                    prediction_type=self.diffusion_config.prediction_type
+                )
+            # Training and sampling now share the scheduler configuration from
+            # the SD checkpoint. This is required for SD2's v-prediction model.
+            self.inference_scheduler = DDIMScheduler.from_config(self.scheduler.config)
             self.vae = AutoencoderKL.from_pretrained(source, subfolder="vae")
             self.unet = UNet2DConditionModel.from_pretrained(source, subfolder="unet")
             expand_unet_conv_in(self.unet, self.model_config.in_channels)
@@ -270,6 +294,7 @@ class ISSModel(nn.Module):
             self.vae.eval()
         else:
             raise ValueError(f"Unknown model backend: {self.model_config.backend!r}")
+        self.prediction_type = scheduler_prediction_type(self.scheduler)
 
     def train(self, mode: bool = True) -> "ISSModel":
         super().train(mode)
@@ -292,7 +317,9 @@ class ISSModel(nn.Module):
             decoded = F.interpolate(decoded, size=output_size, mode="bilinear", align_corners=False)
         return decoded
 
-    def _predict_noise(self, model_input: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+    def _predict_model_output(
+        self, model_input: torch.Tensor, timesteps: torch.Tensor
+    ) -> torch.Tensor:
         if self.backend == "tiny":
             return self.unet(model_input, timesteps)
         hidden = self.empty_text_embedding.to(
@@ -340,7 +367,7 @@ class ISSModel(nn.Module):
         noise = torch.randn_like(target_latent)
         timesteps = torch.randint(
             0,
-            self.scheduler.num_train_timesteps,
+            scheduler_train_timesteps(self.scheduler),
             (target.shape[0],),
             device=target.device,
         )
@@ -348,10 +375,17 @@ class ISSModel(nn.Module):
         model_input = self._model_input(
             noisy_target, left_latent, right_latent, left_mask, right_mask
         )
-        noise_prediction = self._predict_noise(model_input, timesteps)
-        loss_diffusion = F.mse_loss(noise_prediction.float(), noise.float())
+        model_prediction = self._predict_model_output(model_input, timesteps)
+        diffusion_target = diffusion_training_target(
+            self.scheduler, target_latent, noise, timesteps
+        )
+        loss_diffusion = F.mse_loss(
+            model_prediction.float(), diffusion_target.float()
+        )
 
-        predicted_x0 = self.scheduler.predict_x0(noisy_target, noise_prediction, timesteps)
+        predicted_x0 = predict_clean_sample(
+            self.scheduler, noisy_target, model_prediction, timesteps
+        )
         predicted_image = self.decode(predicted_x0.clamp(-4.0, 4.0), target.shape[-2:]).clamp(-1.0, 1.0)
         union = ((left_mask + right_mask) > 0).to(target.dtype)
         left_only = left_mask * (1.0 - right_mask)
@@ -404,26 +438,47 @@ class ISSModel(nn.Module):
             device=left.device,
             dtype=left_latent.dtype,
         )
-        steps = self.scheduler.inference_timesteps(
-            num_inference_steps or self.diffusion_config.inference_steps,
-            left.device,
-        )
+        inference_steps = num_inference_steps or self.diffusion_config.inference_steps
+        if self.backend == "tiny":
+            steps = self.scheduler.inference_timesteps(inference_steps, left.device)
+        else:
+            self.inference_scheduler.set_timesteps(inference_steps, device=left.device)
+            steps = self.inference_scheduler.timesteps
         if initial_image is None or strength >= 1.0:
-            sample = noise
+            noise_scale = float(
+                getattr(self.inference_scheduler, "init_noise_sigma", 1.0)
+            )
+            sample = noise * noise_scale
         else:
             initial_latent = self.encode(initial_image)
             denoise_count = max(1, int(math.ceil(len(steps) * strength)))
             steps = steps[-denoise_count:]
             start = steps[0].expand(left.shape[0])
-            sample = self.scheduler.add_noise(initial_latent, noise, start)
+            sample = self.inference_scheduler.add_noise(initial_latent, noise, start)
         for index, timestep in enumerate(steps):
             batch_timestep = timestep.expand(left.shape[0])
-            model_input = self._model_input(
-                sample, left_latent, right_latent, left_mask, right_mask
+            denoising_target = (
+                self.inference_scheduler.scale_model_input(sample, timestep)
+                if self.backend != "tiny"
+                else sample
             )
-            noise_prediction = self._predict_noise(model_input, batch_timestep)
-            previous = steps[index + 1] if index + 1 < len(steps) else -1
-            sample = self.scheduler.ddim_step(noise_prediction, timestep, previous, sample)
+            model_input = self._model_input(
+                denoising_target, left_latent, right_latent, left_mask, right_mask
+            )
+            model_prediction = self._predict_model_output(model_input, batch_timestep)
+            if self.backend == "tiny":
+                previous = steps[index + 1] if index + 1 < len(steps) else -1
+                sample = self.scheduler.ddim_step(
+                    model_prediction, timestep, previous, sample
+                )
+            else:
+                sample = self.inference_scheduler.step(
+                    model_prediction,
+                    timestep,
+                    sample,
+                    eta=0.0,
+                    return_dict=False,
+                )[0]
         return self.decode(sample, left.shape[-2:]).clamp(-1.0, 1.0)
 
     def trainable_parameters(self) -> Any:
@@ -441,6 +496,9 @@ class ISSModel(nn.Module):
                 else ["noisy_target:4", "left:4", "right:4"]
             ),
             "pretrained_model": self.model_config.pretrained_model,
+            "prediction_type": self.prediction_type,
+            "cross_attention_dim": self.cross_attention_dim,
+            "latent_scale": self.latent_scale,
         }
         (output_dir / "model_metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -298,6 +298,8 @@ class ISSTrainer:
             "resumed_from": self.resumed_from,
             "device": str(self.device),
             "backend": self.model.backend,
+            "pretrained_model": self.config.model.pretrained_model,
+            "prediction_type": self.model.prediction_type,
             "in_channels": self.config.model.in_channels,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "final_metrics": last_metrics,

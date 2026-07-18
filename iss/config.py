@@ -10,7 +10,7 @@ import yaml
 @dataclass
 class ModelConfig:
     backend: str = "tiny"
-    pretrained_model: str = "stable-diffusion-v1-5/stable-diffusion-v1-5"
+    pretrained_model: str = "sd2-community/stable-diffusion-2"
     use_masks: bool = True
     base_channels: int = 32
     latent_downsample: int = 4
@@ -63,6 +63,9 @@ class DiffusionConfig:
     train_timesteps: int = 1000
     inference_steps: int = 30
     strength: float = 0.35
+    # ``auto`` inherits the prediction parameterization from a pretrained
+    # Stable Diffusion scheduler. The tiny backend resolves it to epsilon.
+    prediction_type: str = "auto"
     beta_schedule: str = "linear"
     beta_start: float = 1.0e-4
     beta_end: float = 2.0e-2

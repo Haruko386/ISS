@@ -9,6 +9,10 @@ The pipeline has two stages:
 
 The multi-latent input design is inspired by [Haruko386/ApDepth](https://github.com/Haruko386/ApDepth).
 
+The full training backend is based on Stable Diffusion 2 (`sd2-community/stable-diffusion-2`).
+ISS keeps its own geometry alignment, multi-image conditioning, losses, and sampling flow while
+reusing the SD2 VAE, OpenCLIP text-conditioning space, U-Net, and scheduler configuration.
+
 ## Model architecture
 
 The default model uses 14 input channels:
@@ -35,10 +39,10 @@ During training, the dataset ground-truth panorama is encoded and noised:
 GT panorama -> VAE -> z0 -> add random noise at timestep t -> zt
 
 UNet input:  [zt, left_latent, right_latent, masks]
-UNet target: sampled noise epsilon
+UNet target: scheduler target (velocity v for the default SD2 configuration)
 ```
 
-The primary objective is diffusion noise-prediction MSE. The decoded predicted `x0` is additionally supervised with reconstruction, seam, gradient, and content-preservation losses against the GT panorama.
+The primary objective is scheduler-target MSE. ISS supports `epsilon`, `sample`, and `v_prediction`; the SD2 configuration uses velocity prediction and converts it correctly back to `x0` for the additional reconstruction, seam, gradient, and content-preservation losses.
 
 During inference, two modes are available:
 
@@ -78,13 +82,13 @@ Install the base dependencies:
 pip install -r requirements.txt
 ```
 
-Install the Stable Diffusion dependencies when using `configs/sd-tiny.yaml` or `configs/sd15.yaml`:
+Install the Stable Diffusion dependencies when using `configs/sd-tiny.yaml` or `configs/sd2.yaml`:
 
 ```bash
 pip install -r requirements-sd.txt
 ```
 
-Diffusers is restricted to the tested `<0.36` range. Diffusers 0.35.2 has been verified with the project's PyTorch 2.4 environment.
+The project pins Diffusers to the tested 0.39.x range; use `requirements-sd.txt` so its scheduler and model APIs stay compatible with ISS.
 
 Optionally install the project as a command-line package:
 
@@ -285,7 +289,7 @@ python main.py train --config configs/tiny.yaml --data dataset/prepared/panorama
 
 ## 4. Verify the real Diffusers backend
 
-Before downloading the full Stable Diffusion 1.5 weights, run the small safetensors-based integration model:
+Before downloading the full Stable Diffusion 2 weights, run the small safetensors-based integration model:
 
 ```bash
 python main.py prepare --panoramas res/output.jpg --output dataset/prepared/sd-tiny --width 64 --height 64 --samples-per-image 2 --validation-fraction 0.5
@@ -294,27 +298,28 @@ python main.py train --config configs/sd-tiny.yaml --data dataset/prepared/sd-ti
 
 This configuration downloads a small testing model and performs real `AutoencoderKL`, CLIP, and `UNet2DConditionModel` forward/backward passes. It verifies dependency compatibility and the 14-channel input layer, but its weights are not intended for visual-quality evaluation.
 
-## 5. Train Stable Diffusion 1.5
+## 5. Train Stable Diffusion 2
 
-Prepare the dataset at the resolution configured in `configs/sd15.yaml`, then run:
+Prepare the dataset at the resolution configured in `configs/sd2.yaml`, then run:
 
 ```bash
-python main.py train --config configs/sd15.yaml --data dataset/prepared/panoramas
+python main.py train --config configs/sd2.yaml --data dataset/prepared/panoramas
 ```
 
 The default configuration uses:
 
-- `stable-diffusion-v1-5/stable-diffusion-v1-5`
+- `sd2-community/stable-diffusion-2` (the SD2 768-v model)
 - 512 x 1024 training images
+- scheduler-native `v_prediction`
 - batch size 1 with four-step gradient accumulation
 - FP16 CUDA training
 - gradient checkpointing
 - channels-last memory format
 - 20,000 optimizer steps
 
-Start with 256 x 512 if GPU memory is limited. Update both the dataset preparation resolution and `configs/sd15.yaml`.
+SD2 is pretrained at 768 x 768. ISS uses 512 x 1024 by default to retain the panorama aspect ratio with a similar pixel budget. Start with 256 x 512 if GPU memory is limited, or use 768 x 1536 when memory permits; update both dataset preparation and `configs/sd2.yaml`.
 
-Only the VAE and empty CLIP conditioning are reused from Stable Diffusion. The VAE is frozen and only the UNet is optimized. The original four noisy-latent input weights are preserved, while the left/right/mask condition channels are zero-initialized.
+The VAE and empty OpenCLIP conditioning are reused from Stable Diffusion 2. The VAE is frozen and only the U-Net is optimized. The original four noisy-latent input weights are preserved, while the left/right/mask condition channels are zero-initialized. Training uses the scheduler bundled with the base checkpoint, and inference constructs a matching deterministic DDIM scheduler from it.
 
 SDXL is not currently supported because it requires additional text and size conditioning.
 
@@ -323,7 +328,7 @@ SDXL is not currently supported because it requires additional text and size con
 Resume from a periodic checkpoint, a `final` directory, or a run directory containing `final`:
 
 ```bash
-python main.py train --resume outputs/sd15/checkpoint-010000 --steps 20000
+python main.py train --resume outputs/sd2/checkpoint-010000 --steps 20000
 ```
 
 `--steps` is the target total number of optimizer steps. It is not the number of extra steps to add after the checkpoint.
@@ -331,7 +336,7 @@ python main.py train --resume outputs/sd15/checkpoint-010000 --steps 20000
 Override the output directory or validation interval if needed:
 
 ```bash
-python main.py train --resume outputs/sd15/checkpoint-010000 --output outputs/sd15-resumed --steps 20000 --validation-every 250
+python main.py train --resume outputs/sd2/checkpoint-010000 --output outputs/sd2-resumed --steps 20000 --validation-every 250
 ```
 
 Checkpoints include:
@@ -347,7 +352,7 @@ Checkpoints include:
 ## 7. Evaluate a checkpoint
 
 ```bash
-python main.py evaluate --checkpoint outputs/sd15/best --data dataset/prepared/panoramas --split val --batches 8 --output outputs/sd15/evaluation.json --device cuda
+python main.py evaluate --checkpoint outputs/sd2/best --data dataset/prepared/panoramas --split val --batches 8 --output outputs/sd2/evaluation.json --device cuda
 ```
 
 Evaluation writes:
@@ -364,7 +369,7 @@ Evaluation writes:
 This is the default and most stable mode. It starts from a noised coarse panorama and preserves coarse pixels outside the seam-repair band.
 
 ```bash
-python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/result.png --device cuda
+python main.py infer --checkpoint outputs/sd2/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/result.png --device cuda
 ```
 
 The configured diffusion `strength` controls how much noise is added to the coarse initialization:
@@ -376,7 +381,7 @@ The configured diffusion `strength` controls how much noise is added to the coar
 Override it at runtime:
 
 ```bash
-python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/result.png --strength 0.35 --steps 30 --device cuda
+python main.py infer --checkpoint outputs/sd2/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/result.png --strength 0.35 --steps 30 --device cuda
 ```
 
 ### Pure-noise conditional generation
@@ -384,7 +389,7 @@ python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --ri
 To use exactly two reference images plus a pure random-noise target latent:
 
 ```bash
-python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/pure-diffusion.png --strength 1.0 --no-preserve-known --device cuda
+python main.py infer --checkpoint outputs/sd2/best --left path/to/left.jpg --right path/to/right.jpg --output outputs/pure-diffusion.png --strength 1.0 --no-preserve-known --device cuda
 ```
 
 With these two flags:
@@ -397,7 +402,7 @@ With these two flags:
 Avoid recomputing feature matching by passing a directory created by `align`:
 
 ```bash
-python main.py infer --checkpoint outputs/sd15/best --left path/to/left.jpg --right path/to/right.jpg --aligned-dir outputs/alignment --output outputs/result.png --device cuda
+python main.py infer --checkpoint outputs/sd2/best --left path/to/left.jpg --right path/to/right.jpg --aligned-dir outputs/alignment --output outputs/result.png --device cuda
 ```
 
 The left and right paths are still required by the CLI, but the aligned canvases and masks are loaded from `--aligned-dir`.
@@ -410,14 +415,14 @@ Three ready-to-use configurations are included:
 |---|---|---|
 | `configs/tiny.yaml` | Fast end-to-end pipeline and dataset debugging | CPU or GPU |
 | `configs/sd-tiny.yaml` | Real Diffusers/VAE/CLIP/UNet integration smoke test | CPU or GPU |
-| `configs/sd15.yaml` | Full Stable Diffusion 1.5 fine-tuning | CUDA GPU |
+| `configs/sd2.yaml` | Full Stable Diffusion 2 fine-tuning | CUDA GPU |
 
 Important fields:
 
 ```yaml
 model:
   backend: stable-diffusion
-  pretrained_model: stable-diffusion-v1-5/stable-diffusion-v1-5
+  pretrained_model: sd2-community/stable-diffusion-2
   use_masks: true
   gradient_checkpointing: true
   enable_xformers: false
@@ -432,6 +437,7 @@ train:
 diffusion:
   inference_steps: 30
   strength: 0.35
+  prediction_type: v_prediction
 ```
 
 Enable xFormers only after installing a version compatible with the local PyTorch and CUDA versions:
@@ -538,7 +544,7 @@ Use input images with more overlap or texture. Homography alignment is not suffi
 
 ### Model download problems
 
-Set `model.pretrained_model` to a complete local Diffusers model directory. Prefer safetensors checkpoints. The official SD 1.5 repository contains `vae`, `unet`, `tokenizer`, and `text_encoder` subdirectories required by this project.
+Set `model.pretrained_model` to a complete local Diffusers SD2 model directory. Prefer safetensors checkpoints. The directory must contain `vae`, `unet`, `tokenizer`, `text_encoder`, and `scheduler` subdirectories; ISS loads the scheduler configuration as part of the model rather than assuming an SD1.5 epsilon schedule.
 
 ### Windows Hugging Face cache warning
 
