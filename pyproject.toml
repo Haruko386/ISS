@@ -24,7 +24,7 @@ sd = [
   "safetensors>=0.4,<1",
   "transformers>=5.14.1,<6",
 ]
-dev = ["pytest>=8,<10"]
+dev = ["pytest>=9.1.1,<10"]
 
 [project.scripts]
 iss = "iss.cli:main"
