@@ -21,7 +21,7 @@ sd = [
   "accelerate>=0.30,<2",
   "diffusers>=0.39.0,<0.40",
   "huggingface-hub>=0.23,<2",
-  "safetensors>=0.4,<1",
+  "safetensors>=0.8.0,<1",
   "transformers>=5.14.1,<6",
 ]
 dev = ["pytest>=8,<10"]
