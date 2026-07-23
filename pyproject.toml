@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 sd = [
-  "accelerate>=0.30,<2",
+  "accelerate>=1.14.0,<2",
   "diffusers>=0.39.0,<0.40",
   "huggingface-hub>=0.23,<2",
   "safetensors>=0.4,<1",
