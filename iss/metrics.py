@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 import torch
 
+from .memory import cuda_empty_cache
 from .model import ISSModel
 
 
@@ -69,6 +70,7 @@ def evaluate_model(
     totals: dict[str, float] = {}
     preview: torch.Tensor | None = None
     count = 0
+    cuda_empty_cache(device)
     try:
         for index, raw_batch in enumerate(batches):
             if index >= max_batches:
@@ -94,8 +96,11 @@ def evaluate_model(
                     dim=0,
                 ).cpu()
             count += 1
+            del batch, coarse, prediction
+            cuda_empty_cache(device)
     finally:
         model.train(was_training)
+        cuda_empty_cache(device)
     if count == 0:
         raise ValueError("Validation loader produced no batches.")
     return {key: value / count for key, value in totals.items()}, preview

@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from .alignment import AlignmentError, load_and_align, save_alignment
 from .config import ProjectConfig, load_config, save_config
 from .data import StitchTripletDataset, prepare_synthetic_dataset, prepare_udis_dataset
+from .memory import cuda_empty_cache
 from .metrics import evaluate_model
 from .model import ISSModel
 from .trainer import ISSTrainer, resolve_device, tensor_to_image
@@ -138,9 +139,11 @@ def command_evaluate(args: argparse.Namespace) -> int:
     if args.data:
         config.data.root = args.data
     device = resolve_device(args.device)
+    cuda_empty_cache(device)
     model = ISSModel(config.model, config.diffusion)
     model.load_model(model_path)
     model.to(device).eval()
+    cuda_empty_cache(device)
     dataset = StitchTripletDataset(
         config.data.root,
         width=config.data.image_width,
@@ -163,6 +166,7 @@ def command_evaluate(args: argparse.Namespace) -> int:
         strength=config.diffusion.strength if args.strength is None else args.strength,
         seed=args.seed,
     )
+    cuda_empty_cache(device)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -175,6 +179,8 @@ def command_evaluate(args: argparse.Namespace) -> int:
     if preview is not None:
         grid = torch.cat([image for image in preview], dim=2)
         tensor_to_image(grid).save(output.with_suffix(".png"))
+        del grid
+    cuda_empty_cache(device)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -243,9 +249,11 @@ def run_inference(
         seam_mask = alignment.seam_mask
 
     device = resolve_device(device_name)
+    cuda_empty_cache(device)
     model = ISSModel(config.model, config.diffusion)
     model.load_model(checkpoint)
     model.to(device).eval()
+    cuda_empty_cache(device)
     width, height = config.data.image_width, config.data.image_height
     left = _rgb_tensor(left_bgr, width, height).to(device)
     right = _rgb_tensor(right_bgr, width, height).to(device)
@@ -262,6 +270,7 @@ def run_inference(
         num_inference_steps=steps,
         seed=seed,
     )[0]
+    cuda_empty_cache(device)
     generated_rgb = np.asarray(tensor_to_image(generated)).copy()
     if preserve_known:
         coarse_rgb = cv2.cvtColor(
@@ -296,6 +305,8 @@ def run_inference(
     output_path.with_suffix(".json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    del left, right, mask_left, mask_right, coarse_tensor, generated
+    cuda_empty_cache(device)
     return output_path
 
 

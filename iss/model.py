@@ -17,6 +17,7 @@ from .diffusion import (
     scheduler_prediction_type,
     scheduler_train_timesteps,
 )
+from .memory import cuda_empty_cache
 
 
 def expand_unet_conv_in(unet: nn.Module, in_channels: int) -> nn.Conv2d:
@@ -95,6 +96,20 @@ def configure_unet_memory(
             ) from exc
     if channels_last:
         unet.to(memory_format=torch.channels_last)
+
+
+def _distributed_rank() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def _is_fsdp_module(module: nn.Module) -> bool:
+    try:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    except ImportError:
+        return False
+    return isinstance(module, FSDP)
 
 
 def _time_embedding(timesteps: torch.Tensor, dimension: int) -> torch.Tensor:
@@ -313,6 +328,7 @@ class ISSModel(nn.Module):
                 "empty_text_embedding", empty_text_embedding, persistent=False
             )
             del text_encoder, tokenizer
+            cuda_empty_cache()
             self.latent_scale = float(getattr(self.vae.config, "scaling_factor", 0.18215))
             self.vae.requires_grad_(False)
             self.vae.eval()
@@ -450,19 +466,34 @@ class ISSModel(nn.Module):
             model_prediction.float(), diffusion_target.float()
         )
 
-        predicted_x0 = predict_clean_sample(
-            self.scheduler, noisy_target, model_prediction, timesteps
+        image_loss_enabled = (
+            weights.reconstruction != 0.0
+            or weights.seam != 0.0
+            or weights.gradient != 0.0
+            or weights.preserve != 0.0
         )
-        predicted_image = self.decode(predicted_x0.clamp(-4.0, 4.0), target.shape[-2:]).clamp(-1.0, 1.0)
-        union = ((left_mask + right_mask) > 0).to(target.dtype)
-        left_only = left_mask * (1.0 - right_mask)
-        right_only = right_mask * (1.0 - left_mask)
-        loss_reconstruction = _masked_l1(predicted_image, target, union)
-        loss_seam = _masked_l1(predicted_image, target, seam_mask)
-        loss_gradient = _gradient_l1(predicted_image, target)
-        loss_preserve = _masked_l1(predicted_image, left, left_only) + _masked_l1(
-            predicted_image, right, right_only
-        )
+        if image_loss_enabled:
+            predicted_x0 = predict_clean_sample(
+                self.scheduler, noisy_target, model_prediction, timesteps
+            )
+            predicted_image = self.decode(
+                predicted_x0.clamp(-4.0, 4.0), target.shape[-2:]
+            ).clamp(-1.0, 1.0)
+            union = ((left_mask + right_mask) > 0).to(target.dtype)
+            left_only = left_mask * (1.0 - right_mask)
+            right_only = right_mask * (1.0 - left_mask)
+            loss_reconstruction = _masked_l1(predicted_image, target, union)
+            loss_seam = _masked_l1(predicted_image, target, seam_mask)
+            loss_gradient = _gradient_l1(predicted_image, target)
+            loss_preserve = _masked_l1(predicted_image, left, left_only) + _masked_l1(
+                predicted_image, right, right_only
+            )
+        else:
+            zero = loss_diffusion.new_zeros(())
+            loss_reconstruction = zero
+            loss_seam = zero
+            loss_gradient = zero
+            loss_preserve = zero
         total = (
             weights.diffusion * loss_diffusion
             + weights.reconstruction * loss_reconstruction
@@ -565,6 +596,8 @@ class ISSModel(nn.Module):
                     eta=0.0,
                     return_dict=False,
                 )[0]
+            del batch_timestep, denoising_target, model_input, model_prediction
+            cuda_empty_cache(left.device)
         return self.decode(sample, left.shape[-2:]).clamp(-1.0, 1.0)
 
     def trainable_parameters(self) -> Any:
@@ -582,7 +615,8 @@ class ISSModel(nn.Module):
         	Path: Path to the saved model weights or model directory.
         """
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if _distributed_rank() == 0:
+            output_dir.mkdir(parents=True, exist_ok=True)
         metadata = {
             "backend": self.backend,
             "in_channels": self.model_config.in_channels,
@@ -596,13 +630,33 @@ class ISSModel(nn.Module):
             "cross_attention_dim": self.cross_attention_dim,
             "latent_scale": self.latent_scale,
         }
-        (output_dir / "model_metadata.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        if _distributed_rank() == 0:
+            (output_dir / "model_metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         if self.backend == "tiny":
             path = output_dir / "model.pt"
-            torch.save(self.unet.state_dict(), path)
+            if _distributed_rank() == 0:
+                torch.save(self.unet.state_dict(), path)
             return path
+        if _is_fsdp_module(self.unet):
+            from torch.distributed.fsdp import (
+                FullStateDictConfig,
+                FullyShardedDataParallel as FSDP,
+                StateDictType,
+            )
+
+            config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with FSDP.state_dict_type(self.unet, StateDictType.FULL_STATE_DICT, config):
+                state = self.unet.state_dict()
+            if _distributed_rank() == 0:
+                self.unet.module.save_pretrained(
+                    output_dir / "unet",
+                    state_dict=state,
+                    safe_serialization=True,
+                )
+            del state
+            return output_dir / "unet"
         self.unet.save_pretrained(output_dir / "unet", safe_serialization=True)
         return output_dir / "unet"
 
@@ -617,5 +671,19 @@ class ISSModel(nn.Module):
 
         path = checkpoint / "unet" if (checkpoint / "unet").exists() else checkpoint
         loaded = UNet2DConditionModel.from_pretrained(path)
-        self.unet.load_state_dict(loaded.state_dict(), strict=True)
+        state = loaded.state_dict()
+        if _is_fsdp_module(self.unet):
+            from torch.distributed.fsdp import (
+                FullStateDictConfig,
+                FullyShardedDataParallel as FSDP,
+                StateDictType,
+            )
+
+            config = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
+            with FSDP.state_dict_type(self.unet, StateDictType.FULL_STATE_DICT, config):
+                self.unet.load_state_dict(state, strict=True)
+        else:
+            self.unet.load_state_dict(state, strict=True)
+        del state
         del loaded
+        cuda_empty_cache()

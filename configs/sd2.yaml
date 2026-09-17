@@ -1,4 +1,6 @@
-# Full ISS fine-tuning configuration based on Stable Diffusion 2 (768-v).
+# Full-resolution SD2 baseline based on Stable Diffusion 2 (768-v).
+# This no-decode variant trains only the latent diffusion objective. Keeping
+# the pixel-space auxiliary loss weights at zero makes training skip VAE decode.
 model:
   backend: stable-diffusion
   pretrained_model: /root/ApDepth/pretrained_checkpoint/stable-diffusion-2
@@ -13,30 +15,35 @@ data:
   # a similar pixel budget to its native 768x768 training resolution.
   image_height: 512
   image_width: 1024
-  num_workers: 4
+  num_workers: 1
 
 loss:
   diffusion: 1.0
-  reconstruction: 0.05
-  seam: 0.25
-  gradient: 0.05
-  preserve: 0.25
+  reconstruction: 0.0
+  seam: 0.0
+  gradient: 0.0
+  preserve: 0.0
 
 train:
-  output_dir: outputs/sd2
+  output_dir: outputs/sd2-nodecode
   batch_size: 1
   max_steps: 20000
   learning_rate: 0.00001
   weight_decay: 0.01
-  grad_accumulation: 4
+  # Full precision uses more memory, so keep the micro-batch at 1 and use
+  # accumulation for a larger effective batch without lowering numerical precision.
+  grad_accumulation: 8
   grad_clip: 1.0
   checkpoint_every: 1000
-  validation_every: 500
+  # Validation runs diffusion sampling and can create a separate memory peak.
+  # Run evaluation manually after checkpoints when training full resolution.
+  validation_every: 0
   validation_batches: 2
   log_every: 10
   seed: 42
   device: cuda
-  mixed_precision: fp16
+  mixed_precision: "no"
+  distributed: fsdp
 
 diffusion:
   inference_steps: 30

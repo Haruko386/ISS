@@ -84,6 +84,33 @@ def test_tiny_training_loss_and_sampling():
     assert torch.isfinite(sample).all()
 
 
+def test_zero_image_loss_weights_skip_decode(monkeypatch):
+    model = ISSModel(
+        ModelConfig(backend="tiny", use_masks=True, base_channels=8, latent_downsample=4),
+        DiffusionConfig(train_timesteps=10, inference_steps=2),
+    )
+
+    def fail_decode(*_args, **_kwargs):
+        raise AssertionError("decode should be skipped when image losses are disabled")
+
+    monkeypatch.setattr(model, "decode", fail_decode)
+    losses = model.training_losses(
+        _batch(),
+        LossConfig(
+            reconstruction=0.0,
+            seam=0.0,
+            gradient=0.0,
+            preserve=0.0,
+        ),
+    )
+
+    assert torch.isfinite(losses["loss"])
+    assert losses["reconstruction"].item() == 0.0
+    assert losses["seam"].item() == 0.0
+    assert losses["gradient"].item() == 0.0
+    assert losses["preserve"].item() == 0.0
+
+
 def test_twelve_channel_ablation():
     model = ISSModel(
         ModelConfig(backend="tiny", use_masks=False, base_channels=8),

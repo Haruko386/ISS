@@ -56,6 +56,9 @@ class TrainConfig:
     seed: int = 42
     device: str = "auto"
     mixed_precision: str = "no"
+    # ``fsdp`` enables torchrun-launched Fully Sharded Data Parallel training.
+    # With WORLD_SIZE=1 it is a no-op, so the same config can run on one GPU.
+    distributed: str = "none"
 
 
 @dataclass
