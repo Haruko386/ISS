@@ -1,5 +1,5 @@
 -r requirements.txt
-accelerate>=0.30,<2
+accelerate>=1.14.0,<2
 # Pin the Diffusers scheduler/model APIs used by the SD2 backend.
 diffusers>=0.39.0,<0.40
 huggingface-hub>=0.23,<2
